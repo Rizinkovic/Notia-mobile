@@ -61,24 +61,24 @@ class ReaderScreen(private val a: MainActivity, bookId: String) : Screen() {
     init {
         val b = book
         val col = a.vbox()
-        val top = a.hbox { setPadding(a.dp(8), a.dp(8), a.dp(16), a.dp(4)) }
-        top.put(a.iconBtn(R.drawable.ic_back, L("Back", "Retour"), Th.ink, 24) { a.pop() })
-        top.put(a.vbox {
-            put(a.text(b?.title ?: "", 15f, Th.ink, true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
+        col.put(a.pageHeader({ a.pop() }, a.vbox {
+            put(a.text(b?.title ?: "", 16f, Th.ink, true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
             put(stats, MATCH, WRAP, 0f, 0, 3, 0, 0)
-        }, 0, WRAP, 1f)
-        col.put(top)
+        }))
         col.put(content, MATCH, 0, 1f)
         root.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
 
+        // glass toolbar: translucent tint, soft sheen and a hairline edge, floating above the page
         val pill = a.hbox {
-            background = a.rounded(Th.p.nav, 28f); elevation = a.dpf(10f); setPadding(a.dp(8), 0, a.dp(8), 0)
-            put(a.iconBtn(R.drawable.ic_pen, L("Highlight", "Surligner"), 0xFFF2B33D.toInt()) { highlight() })
-            put(a.iconBtn(R.drawable.ic_bookmark, L("Bookmark", "Marque-page"), 0xFFFFFFFF.toInt()) { bookmark() })
-            put(a.iconBtn(R.drawable.ic_bullets, L("Contents, bookmarks and highlights", "Sommaire, marque-pages et surlignages"), 0xFFFFFFFF.toInt()) { panel(0) })
+            background = a.glass(32f); elevation = a.dpf(10f); setPadding(a.dp(10), a.dp(6), a.dp(10), a.dp(6))
+            put(a.iconBtn(R.drawable.ic_pen, L("Highlight", "Surligner"), 0xFFF2B33D.toInt(), 22) { highlight() }, a.dp(48), a.dp(48), 0f, 0, 0, 4, 0)
+            put(View(a).apply { setBackgroundColor(if (Store.dark) 0x33FFFFFF else 0x22000000) }, 1, a.dp(24), 0f, 0, 0, 4, 0)
+            put(a.iconBtn(R.drawable.ic_bookmark, L("Bookmark", "Marque-page"), Th.ink, 22) { bookmark() }, a.dp(48), a.dp(48), 0f, 0, 0, 4, 0)
+            put(View(a).apply { setBackgroundColor(if (Store.dark) 0x33FFFFFF else 0x22000000) }, 1, a.dp(24), 0f, 0, 0, 4, 0)
+            put(a.iconBtn(R.drawable.ic_bullets, L("Contents, bookmarks and highlights", "Sommaire, marque-pages et surlignages"), Th.ink, 22) { panel(0) }, a.dp(48), a.dp(48))
         }
-        bar.addView(pill, FrameLayout.LayoutParams(WRAP, a.dp(56), Gravity.CENTER))
-        root.addView(bar, FrameLayout.LayoutParams(WRAP, a.dp(56), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also { it.bottomMargin = a.dp(20) })
+        bar.addView(pill, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER))
+        root.addView(bar, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also { it.bottomMargin = a.dp(24) })
         updateStats()
         if (b == null) message(L("This book is no longer in the library.", "Ce livre n’est plus dans la bibliothèque."), false) else open(b)
     }

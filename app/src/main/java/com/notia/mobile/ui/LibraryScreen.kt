@@ -81,10 +81,8 @@ class LibraryScreen(private val a: MainActivity) : Screen() {
     }
 
     init {
-        val head = a.hbox { setPadding(a.dp(20), a.dp(18), a.dp(20), 0) }
-        head.put(a.text(L("Library", "Bibliothèque"), 30f, Th.ink, true), 0, WRAP, 1f)
-        root.put(head)
-        root.put(stats, MATCH, WRAP, 0f, 20, 14, 20, 8)
+        root.put(a.tabHeader(L("Library", "Bibliothèque")))
+        root.put(stats, MATCH, WRAP, 0f, 20, 8, 20, 8)
         list.divider = null; list.dividerHeight = 0; list.clipToPadding = false; list.selector = android.graphics.drawable.ColorDrawable(0)
         list.setPadding(a.dp(20), a.dp(4), a.dp(20), a.dp(170)); list.adapter = adapter
         val body = FrameLayout(a)

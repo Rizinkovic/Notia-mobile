@@ -26,6 +26,14 @@ reading time, bookmarks, highlights, **table of contents**, daily "finish your b
 Android Keystore, PIN or password, lockout, screenshot-blocked); Wi-Fi send/receive and desktop QR sync (same protocol
 as the desktop app); dark/light; English/French.
 
+**Reminders (Settings → Reminders):** a morning "write a note or an idea" nudge (time of your choice, opens a blank note when tapped,
+skipped if you already wrote today), a "come back" nudge after 3, 7, 14 and 30 days without opening the app, and an evening
+"finish your book" nudge (skipped if you already read today). Each one can be switched off. **Settings** also has About, Privacy
+policy, version info and developer contact.
+
+**Note editor toolbar:** one comfortable row of basics (undo, redo, bold, italic, underline, lists); the arrow at its end opens
+all the other tools (headings, code, line, link, image, table, formula, chart, text colour, highlight, clear formatting). The choice is remembered.
+
 ## Open in Notia
 Tap a PDF, EPUB, MOBI/AZW, DOCX or TXT file in any file manager, mail or chat app and choose **Notia** (or use
 **Share → Notia**). The book is added to the library once (opening the same file again reuses it) and opens straight
@@ -39,3 +47,13 @@ The password vault cannot be migrated (the old one used a different secure store
 * PDFs have no highlight (they are images); bookmarks and page jump work. Other formats support highlights.
 * QR scanning uses Google Play services. Without it, paste the sync link instead.
 * For on-time reminders Android 12+ may ask to allow "Alarms & reminders"; Notia shows a prompt for it.
+
+## Changelog
+### 1.0.0
+* Version corrected to 1.0.0 (versionCode is unchanged so it still installs over earlier builds).
+* Fixed header buttons (back, transfer, lock, share): icon buttons were being stretched to the full row width. Fixed at the source in `LinearLayout.put`.
+* Fixed tasks: new tasks and the suggested times (In 1 hour, Tonight 20:00, Tomorrow 09:00) now save, stay highlighted and confirm with a message.
+* New Settings page: reminders, About, Privacy policy, version, website notia.srichard.site, contact rsongrichard@gmail.com.
+* New notifications: morning writing reminder, come-back reminder, finish-your-book reminder. Permission is requested once on first launch (Android 13+).
+* Redesigned note toolbar (basics / all tools) and a glass-style reader toolbar in the library.
+* Category chips line up with the page margin; note list recycles its views.

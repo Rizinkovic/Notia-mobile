@@ -38,6 +38,15 @@ object Store {
     var lang = "en"
     var dark = true
     var purged = 0
+    // ---- user preferences (saved in state.json) ----
+    var remMorning = true        // daily "write a note / idea" reminder
+    var morningHour = 8
+    var morningMin = 0
+    var remInactive = true       // "come back" nudges after days away
+    var remBooks = true          // evening "finish your book" reminder
+    var toolsAll = false         // editor toolbar: false = basics only, true = every tool
+    var notifAsked = false       // the first-launch notification prompt was shown
+    var lastOpen = 0L            // when the app was last used (drives the "come back" nudges)
     @Volatile var loaded = false
     private val listeners = ArrayList<() -> Unit>()
     private val handler = Handler(Looper.getMainLooper())
@@ -70,6 +79,9 @@ object Store {
     private fun readAll() {
         (readJson(File(dir, "state.json")) as? JSONObject)?.let { s ->
             lang = s.optString("lang", lang); dark = s.optBoolean("dark", true)
+            remMorning = s.optBoolean("remMorning", true); morningHour = s.optInt("morningHour", 8).coerceIn(0, 23); morningMin = s.optInt("morningMin", 0).coerceIn(0, 59)
+            remInactive = s.optBoolean("remInactive", true); remBooks = s.optBoolean("remBooks", true)
+            toolsAll = s.optBoolean("toolsAll", false); notifAsked = s.optBoolean("notifAsked", false); lastOpen = s.optLong("lastOpen", 0L)
             s.optJSONArray("cats")?.let { a -> for (i in 0 until a.length()) a.getJSONObject(i).let { cats.add(Cat(it.getString("id"), it.getString("name"), it.optString("color", CAT_COLORS[0]))) } }
         }
         File(dir, "notes").listFiles()?.forEach { f ->
@@ -157,6 +169,8 @@ object Store {
         val jobs = ArrayList<Pair<File, String>>(); val dels = ArrayList<File>()
         for (k in dirty) when {
             k == "state" -> jobs.add(File(dir, "state.json") to JSONObject().put("lang", lang).put("dark", dark)
+                .put("remMorning", remMorning).put("morningHour", morningHour).put("morningMin", morningMin).put("remInactive", remInactive).put("remBooks", remBooks)
+                .put("toolsAll", toolsAll).put("notifAsked", notifAsked).put("lastOpen", lastOpen)
                 .put("cats", JSONArray().also { a -> cats.forEach { a.put(JSONObject().put("id", it.id).put("name", it.name).put("color", it.color)) } }).toString())
             k == "tasks" -> jobs.add(File(dir, "tasks.json") to JSONArray().also { a -> tasks.forEach { a.put(JSONObject().put("id", it.id).put("title", it.title).put("due", it.due ?: JSONObject.NULL).put("done", it.done).put("armed", it.armed)) } }.toString())
             k == "lib" -> jobs.add(File(dir, "library.json") to JSONArray().also { a -> books.forEach { b ->

@@ -43,20 +43,19 @@ class TasksScreen(private val a: MainActivity) : Screen() {
     private val input = a.field(L("New task", "Nouvelle tâche"))
     private val dueChips = a.hbox()
     private var due: Long? = null
+    private var dueKey = "none"          // which reminder chip is selected: none | 1h | tonight | tomorrow | custom
     private val onData = { render() }
 
     init {
+        root.put(a.tabHeader(L("Tasks", "Tâches")))
         val sv = a.vscroll {
-            setPadding(a.dp(20), a.dp(18), a.dp(20), a.dp(120))
-            put(a.text(L("Tasks", "Tâches"), 30f, Th.ink, true), MATCH, WRAP, 0f, 0, 0, 0, 14)
+            setPadding(a.dp(20), a.dp(6), a.dp(20), a.dp(120))
             put(warn)
             put(a.hbox {
                 put(input, 0, WRAP, 1f)
                 put(a.pill(L("Add", "Ajouter")) { add() }, WRAP, a.dp(48), 0f, 8, 0, 0, 0)
             })
-            val hs = a.hscroll {}
-            hs.removeAllViews(); hs.addView(dueChips, FrameLayout.LayoutParams(WRAP, WRAP))
-            put(hs, MATCH, WRAP, 0f, 0, 10, 0, 14)
+            put(a.chipScroller(dueChips, 0), MATCH, WRAP, 0f, 0, 10, 0, 14)
             put(listBox)
         }
         input.setOnEditorActionListener { _, _, _ -> add(); true }
@@ -65,16 +64,21 @@ class TasksScreen(private val a: MainActivity) : Screen() {
 
     private fun plusHours(h: Int) = System.currentTimeMillis() + h * 3_600_000L
     private fun at(hour: Int, addDays: Int): Long = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, addDays); set(Calendar.HOUR_OF_DAY, hour); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
+    private fun evening(): Long = at(20, 0).let { if (it <= System.currentTimeMillis() + 60_000) at(20, 1) else it }
 
+    /** The reminder chips. The chosen one now stays highlighted (before, only "No reminder" ever showed as selected). */
     private fun drawDue() {
         dueChips.removeAllViews()
-        fun c(label: String, v: Long?, sel: Boolean) = dueChips.put(a.chip(label, sel, 0, { due = v; drawDue() }), WRAP, WRAP, 0f, 0, 0, 8, 0)
-        c(L("No reminder", "Sans rappel"), null, due == null)
-        val tonight = at(20, 0).let { if (it <= System.currentTimeMillis() + 60_000) at(20, 1) else it }
-        c(L("In 1 hour", "Dans 1 h"), plusHours(1), false)
-        c(L("Tonight 20:00", "Ce soir 20:00"), tonight, false)
-        c(L("Tomorrow 09:00", "Demain 09:00"), at(9, 1), false)
-        dueChips.put(a.chip(if (due != null) "⏰ " + fmtDate(due!!, true) else L("Pick date & time", "Choisir date et heure"), due != null, 0, { pick() }), WRAP, WRAP)
+        fun c(label: String, key: String, value: () -> Long?) {
+            dueChips.put(a.chip(label, dueKey == key, 0, { due = value(); dueKey = key; drawDue() }), WRAP, WRAP, 0f, 0, 0, 8, 0)
+        }
+        c(L("No reminder", "Sans rappel"), "none") { null }
+        c(L("In 1 hour", "Dans 1 h"), "1h") { plusHours(1) }
+        val today = at(20, 0) > System.currentTimeMillis() + 60_000
+        c(if (today) L("Tonight 20:00", "Ce soir 20:00") else L("Tomorrow 20:00", "Demain 20:00"), "tonight") { evening() }
+        c(L("Tomorrow 09:00", "Demain 09:00"), "tomorrow") { at(9, 1) }
+        val custom = dueKey == "custom" && due != null
+        dueChips.put(a.chip(if (custom) "⏰ " + fmtDate(due!!, true) else L("Pick date & time", "Choisir date et heure"), custom, 0, { pick() }), WRAP, WRAP)
     }
 
     private fun pick() {
@@ -82,22 +86,39 @@ class TasksScreen(private val a: MainActivity) : Screen() {
         DatePickerDialog(a, dialogTheme(), { _, y, m, d ->
             TimePickerDialog(a, dialogTheme(), { _, h, mi ->
                 val t = Calendar.getInstance().apply { set(y, m, d, h, mi, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
-                if (t <= System.currentTimeMillis()) a.toast(L("Choose a time in the future.", "Choisissez une heure dans le futur.")) else { due = t; drawDue() }
+                if (t <= System.currentTimeMillis()) a.toast(L("Choose a time in the future.", "Choisissez une heure dans le futur.")) else { due = t; dueKey = "custom"; drawDue() }
             }, c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.MINUTE), true).show()
         }, c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)).show()
     }
 
+    private fun hideKeyboard() {
+        (a.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager).hideSoftInputFromWindow(input.windowToken, 0)
+        input.clearFocus()
+    }
+
     private fun add() {
         val t = input.text.toString().trim()
-        if (t.isEmpty()) return
-        val k = Task(newId(), t.take(200), due, false)
+        if (t.isEmpty()) { a.toast(L("Type a task first.", "Écrivez d’abord une tâche.")); return }
         val d = due
-        Store.tasks.add(k); input.setText(""); due = null; drawDue()
-        if (d != null) Reminders.ask(a) { ok ->
-            if (ok) { k.armed = true; Reminders.schedule(a, k.id, d) } else k.armed = false
+        if (d != null && d <= System.currentTimeMillis()) {
+            a.toast(L("That time has already passed. Pick a later one.", "Cette heure est déjà passée. Choisissez-en une plus tardive."))
+            due = null; dueKey = "none"; drawDue(); return
+        }
+        val k = Task(newId(), t.take(200), d, false)
+        Store.tasks.add(k)
+        input.setText(""); due = null; dueKey = "none"; drawDue(); hideKeyboard()
+        Store.saveTasks(); render()
+        if (d == null) { a.toast(L("Task added.", "Tâche ajoutée.")); return }
+        Reminders.ask(a) { ok ->
+            if (ok) {
+                k.armed = true; Reminders.schedule(a, k.id, d)
+                a.toast(L("Task added. Reminder set for ", "Tâche ajoutée. Rappel prévu le ") + fmtDate(d, true))
+            } else {
+                k.armed = false
+                a.toast(L("Task added, but notifications are off so it will not ring.", "Tâche ajoutée, mais les notifications sont désactivées : aucune sonnerie."))
+            }
             Store.saveTasks(); render()
-        } else Store.saveTasks()
-        render()
+        }
     }
 
     private fun toggle(k: Task) {
@@ -114,7 +135,8 @@ class TasksScreen(private val a: MainActivity) : Screen() {
         else if (hasDue && !Reminders.canExact(a)) warn.put(note(L("For on-time reminders, allow “Alarms & reminders”. Without it they may be a few minutes late.", "Pour des rappels à l’heure, autorisez « Alarmes et rappels ». Sinon ils peuvent avoir quelques minutes de retard."), L("Allow", "Autoriser")) { Reminders.openExactSettings(a) }, MATCH, WRAP, 0f, 0, 0, 0, 12)
         listBox.removeAllViews()
         val sorted = Store.tasks.sortedWith(compareBy<Task>({ it.done }, { it.due ?: Long.MAX_VALUE }))
-        if (sorted.isEmpty()) listBox.put(a.text(L("No tasks yet.", "Aucune tâche."), 15f, Th.sub).apply { gravity = Gravity.CENTER }, MATCH, WRAP, 0f, 0, 40, 0, 0)
+        if (sorted.isEmpty()) listBox.put(a.text(L("No tasks yet.\nType one above, add a reminder if you like, then tap Add.", "Aucune tâche.\nÉcrivez-en une ci-dessus, ajoutez un rappel si vous voulez, puis touchez Ajouter."), 15f, Th.sub).apply { gravity = Gravity.CENTER; setLineSpacing(0f, 1.2f) }, MATCH, WRAP, 0f, 0, 40, 0, 0)
+        else listBox.put(a.text(L("${sorted.count { !it.done }} to do  •  ${sorted.count { it.done }} done", "${sorted.count { !it.done }} à faire  •  ${sorted.count { it.done }} terminée(s)"), 12f, Th.sub, true), MATCH, WRAP, 0f, 4, 0, 0, 8)
         for (k in sorted) listBox.put(a.hbox {
             background = a.rounded(Th.card, 18f, Th.line); setPadding(a.dp(6), a.dp(4), a.dp(6), a.dp(4)); minimumHeight = a.dp(60)
             put(a.iconBtn(if (k.done) R.drawable.ic_check_circle else R.drawable.ic_circle, L("Done", "Terminé"), if (k.done) Th.accent else Th.sub, 24) { toggle(k) })
@@ -205,16 +227,15 @@ class VaultScreen(private val a: MainActivity) : Screen() {
 
     private fun unlocked(): View {
         val list = entries!!
-        return a.vscroll {
-            setPadding(a.dp(20), a.dp(18), a.dp(20), a.dp(120))
-            put(a.hbox {
-                put(a.text(L("Vault", "Coffre"), 30f, Th.ink, true), 0, WRAP, 1f)
-                put(a.iconBtn(R.drawable.ic_lock, L("Lock", "Verrouiller"), Th.ink) { lock() })
-            }, MATCH, WRAP, 0f, 0, 0, 0, 14)
+        val col = a.vbox()
+        col.put(a.tabHeader(L("Vault", "Coffre"), a.iconBtn(R.drawable.ic_lock, L("Lock", "Verrouiller"), Th.ink) { lock() }))
+        col.put(a.vscroll {
+            setPadding(a.dp(20), a.dp(8), a.dp(20), a.dp(120))
             put(a.pill(L("Add password", "Ajouter un mot de passe")) { edit(null) }, MATCH, WRAP, 0f, 0, 0, 0, 14)
             if (list.isEmpty()) put(a.text(L("No passwords saved.", "Aucun mot de passe enregistré."), 15f, Th.sub).apply { gravity = Gravity.CENTER }, MATCH, WRAP, 0f, 0, 30, 0, 0)
             for (e in list) put(a.hbox {
-                background = a.rounded(Th.card, 18f, Th.line); setPadding(a.dp(16), a.dp(12), a.dp(6), a.dp(12))
+                background = a.pressable(Th.card, 18f, Th.line); setPadding(a.dp(16), a.dp(12), a.dp(6), a.dp(12))
+                isClickable = true; setOnClickListener { edit(e) }   // tap the card to edit
                 put(a.vbox {
                     put(a.text(e.site.ifBlank { "—" }, 16f, Th.ink, true))
                     if (e.user.isNotBlank()) put(a.text(e.user, 13f, Th.sub), MATCH, WRAP, 0f, 0, 3, 0, 0)
@@ -222,12 +243,12 @@ class VaultScreen(private val a: MainActivity) : Screen() {
                 }, 0, WRAP, 1f)
                 put(a.iconBtn(if (e.id in revealed) R.drawable.ic_eye_off else R.drawable.ic_eye, L("Show", "Afficher"), Th.sub, 20) { if (!revealed.add(e.id)) revealed.remove(e.id); render() })
                 put(a.iconBtn(R.drawable.ic_doc, L("Copy", "Copier"), Th.sub, 20) { copy(e.pass) })
-                put(a.iconBtn(R.drawable.ic_pen, L("Edit", "Modifier"), Th.sub, 20) { edit(e) })
                 put(a.iconBtn(R.drawable.ic_delete, L("Delete", "Supprimer"), Th.danger, 20) {
                     a.confirm(L("Delete this password?", "Supprimer ce mot de passe ?"), e.site, L("Delete", "Supprimer")) { list.remove(e); Vault.save(a, list); render() }
                 })
             }, MATCH, WRAP, 0f, 0, 0, 0, 8)
-        }
+        }, MATCH, 0, 1f)
+        return col
     }
 
     private fun edit(e: VaultEntry?) {
@@ -264,10 +285,7 @@ class TransferScreen(private val a: MainActivity, pre: String? = null) : Screen(
     private var busy = false
 
     init {
-        val top = a.hbox { setPadding(a.dp(8), a.dp(8), a.dp(16), 0) }
-        top.put(a.iconBtn(R.drawable.ic_back, L("Back", "Retour"), Th.ink, 24) { a.pop() })
-        top.put(a.text(L("Wi-Fi transfer", "Transfert Wi-Fi"), 22f, Th.ink, true), 0, WRAP, 1f)
-        root.put(top)
+        root.put(a.pageHeader({ a.pop() }, a.text(L("Wi-Fi transfer", "Transfert Wi-Fi"), 22f, Th.ink, true)))
         val sv = a.vscroll {
             setPadding(a.dp(20), a.dp(14), a.dp(20), a.dp(40))
             // desktop sync

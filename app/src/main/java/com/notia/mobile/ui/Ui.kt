@@ -41,6 +41,8 @@ fun L(en: String, fr: String) = if (Store.lang == "fr") fr else en
 
 const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
 const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+/** "Use the size the view already declares" (icon buttons are 44dp squares), else MATCH width / WRAP height. */
+const val AUTO = -3
 
 fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
 fun Context.dpf(v: Float): Float = v * resources.displayMetrics.density
@@ -49,8 +51,13 @@ fun View.dp(v: Int) = context.dp(v)
 fun Context.vbox(f: LinearLayout.() -> Unit = {}) = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; f() }
 fun Context.hbox(f: LinearLayout.() -> Unit = {}) = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; f() }
 
-fun LinearLayout.put(v: View, w: Int = MATCH, h: Int = WRAP, weight: Float = 0f, l: Int = 0, t: Int = 0, r: Int = 0, b: Int = 0): View {
-    addView(v, LinearLayout.LayoutParams(w, h, weight).also { it.setMargins(dp(l), dp(t), dp(r), dp(b)) }); return v
+fun LinearLayout.put(v: View, w: Int = AUTO, h: Int = AUTO, weight: Float = 0f, l: Int = 0, t: Int = 0, r: Int = 0, b: Int = 0): View {
+    // Before: the default was always MATCH x WRAP, which silently stretched every 44dp icon button to the full
+    // row width (buttons drifted to the middle of the screen, titles collapsed to 0 width, task rows looked empty).
+    val own = v.layoutParams
+    val ww = if (w == AUTO) (own?.width ?: MATCH) else w
+    val hh = if (h == AUTO) (own?.height ?: WRAP) else h
+    addView(v, LinearLayout.LayoutParams(ww, hh, weight).also { it.setMargins(dp(l), dp(t), dp(r), dp(b)) }); return v
 }
 fun FrameLayout.put(v: View, w: Int = MATCH, h: Int = MATCH, gravity: Int = Gravity.TOP or Gravity.START, l: Int = 0, t: Int = 0, r: Int = 0, b: Int = 0): View {
     addView(v, FrameLayout.LayoutParams(w, h, gravity).also { it.setMargins(dp(l), dp(t), dp(r), dp(b)) }); return v
@@ -90,6 +97,37 @@ fun Context.iconBtn(res: Int, desc: String, color: Int = Th.ink, size: Int = 22,
     isClickable = true; setOnClickListener { onClick() }
 }
 
+/** One consistent screen header: 56dp tall, title vertically centred, round 44dp actions on the right. */
+fun Context.tabHeader(title: CharSequence, vararg actions: View): LinearLayout = hbox {
+    minimumHeight = dp(56); setPadding(dp(20), dp(6), dp(10), 0)
+    put(text(title, 30f, Th.ink, true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }, 0, WRAP, 1f)
+    for (a in actions) put(a)
+}
+
+/** Header for pushed screens (editor, reader, transfer): back button, flexible middle, actions. */
+fun Context.pageHeader(onBack: () -> Unit, middle: View?, vararg actions: View): LinearLayout = hbox {
+    minimumHeight = dp(56); setPadding(dp(6), dp(6), dp(6), 0)
+    put(iconBtn(com.notia.mobile.R.drawable.ic_back, L("Back", "Retour"), Th.ink, 24) { onBack() })
+    if (middle != null) put(middle, 0, WRAP, 1f, 4, 0, 4, 0) else put(View(context), 0, 1, 1f)
+    for (a in actions) put(a)
+}
+
+/**
+ * Frosted-glass surface. Plain Views cannot blur what is behind them on every Android version, so the effect is built
+ * from a translucent tint, a soft top sheen and a hairline highlight border; it reads as glass over text and covers.
+ */
+fun Context.glass(r: Float): android.graphics.drawable.Drawable {
+    val dark = Store.dark
+    val base = GradientDrawable().apply { cornerRadius = dpf(r); setColor(if (dark) 0x992A2640.toInt() else 0xA6FFFFFF.toInt()) }
+    val sheen = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+        intArrayOf(if (dark) 0x38FFFFFF else 0x99FFFFFF.toInt(), 0x00FFFFFF)).apply { cornerRadius = dpf(r) }
+    val edge = GradientDrawable().apply {
+        cornerRadius = dpf(r); setColor(Color.TRANSPARENT)
+        setStroke(Math.max(1, dpf(1f).toInt()), if (dark) 0x40FFFFFF else 0x30000000)
+    }
+    return android.graphics.drawable.LayerDrawable(arrayOf(base, sheen, edge))
+}
+
 fun Context.pill(label: String, filled: Boolean = true, danger: Boolean = false, onClick: () -> Unit): TextView = text(label, 15f, if (filled) Th.accentInk else Th.ink, true).apply {
     gravity = Gravity.CENTER
     val c = if (danger) Th.danger else Th.accent
@@ -100,8 +138,8 @@ fun Context.pill(label: String, filled: Boolean = true, danger: Boolean = false,
 
 fun Context.chip(label: String, selected: Boolean, dot: Int = 0, onClick: () -> Unit, onLong: (() -> Unit)? = null): LinearLayout = hbox {
     background = pressable(if (selected) Th.accent else Th.card, 17f, if (selected) 0 else Th.line)
-    setPadding(dp(14), 0, dp(14), 0); minimumHeight = dp(34)
-    if (dot != 0) put(View(context).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(dot) } }, dp(8), dp(8), 0f, 0, 0, 6, 0)
+    setPadding(dp(14), 0, dp(14), 0); minimumHeight = dp(36); gravity = Gravity.CENTER
+    if (dot != 0) put(View(context).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(dot); if (selected) setStroke(dp(1), Th.accentInk) } }, dp(8), dp(8), 0f, 0, 0, 7, 0)
     put(text(label, 13f, if (selected) Th.accentInk else Th.ink, true), WRAP, WRAP)
     isClickable = true; setOnClickListener { onClick() }
     if (onLong != null) setOnLongClickListener { onLong(); true }
@@ -111,6 +149,16 @@ fun Context.field(hint: String, single: Boolean = true, minLines: Int = 1): Edit
     setHint(hint); setHintTextColor(Th.sub); setTextColor(Th.ink); textSize = 15f
     background = rounded(Th.field, 14f); setPadding(dp(14), dp(12), dp(14), dp(12))
     if (single) { setSingleLine(true); imeOptions = EditorInfo.IME_ACTION_DONE } else { inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES; this.minLines = minLines; gravity = Gravity.TOP or Gravity.START }
+}
+
+/**
+ * Horizontally scrolling row of chips whose first chip lines up with the 20dp page margin.
+ * (The old code put the padding on a view that was then thrown away, so the chips sat flush against the screen edge.)
+ */
+fun Context.chipScroller(row: LinearLayout, side: Int = 20): HorizontalScrollView = HorizontalScrollView(this).apply {
+    isHorizontalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER
+    clipToPadding = false; setPadding(dp(side), 0, dp(side), 0)
+    addView(row, FrameLayout.LayoutParams(WRAP, WRAP))
 }
 
 fun Context.hscroll(f: LinearLayout.() -> Unit): HorizontalScrollView = HorizontalScrollView(this).apply {

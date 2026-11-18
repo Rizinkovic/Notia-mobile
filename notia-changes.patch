@@ -1,0 +1,1156 @@
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 0d19b00..dfc4450 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -20,7 +20,7 @@ android {
+         minSdk = 24
+         targetSdk = 34
+         versionCode = 100 + (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1)
+-        versionName = "2.0.0"
++        versionName = "1.0.0"
+         resourceConfigurations += listOf("en", "fr")
+     }
+ 
+diff --git a/app/src/main/java/com/notia/mobile/MainActivity.kt b/app/src/main/java/com/notia/mobile/MainActivity.kt
+index 083fc9c..2af6cc3 100644
+--- a/app/src/main/java/com/notia/mobile/MainActivity.kt
++++ b/app/src/main/java/com/notia/mobile/MainActivity.kt
+@@ -20,7 +20,13 @@ import android.widget.ProgressBar
+ import com.notia.mobile.core.Store
+ import com.notia.mobile.sys.MainActivityLike
+ import com.notia.mobile.sys.Reminders
++import com.notia.mobile.ui.L
+ import com.notia.mobile.ui.MATCH
++import com.notia.mobile.ui.Sheet
++import com.notia.mobile.ui.EditorScreen
++import com.notia.mobile.ui.WRAP
++import com.notia.mobile.ui.pill
++import com.notia.mobile.ui.text
+ import com.notia.mobile.ui.Screen
+ import com.notia.mobile.ui.Tabs
+ import com.notia.mobile.sys.Library
+@@ -50,6 +56,7 @@ class MainActivity : Activity(), MainActivityLike {
+     private var pickCb: ((Uri?) -> Unit)? = null
+     private var permCb: ((Boolean) -> Unit)? = null
+     private var pendingBook: Uri? = null
++    private var pendingNewNote = false
+ 
+     override fun onCreate(savedInstanceState: Bundle?) {
+         super.onCreate(savedInstanceState)
+@@ -58,12 +65,13 @@ class MainActivity : Activity(), MainActivityLike {
+         setContentView(root)
+         applyBars()
+         pendingBook = bookUriOf(intent)
++        pendingNewNote = intent?.getBooleanExtra(Reminders.EXTRA_NEW_NOTE, false) == true
+         showLoading()
+         val t0 = System.currentTimeMillis()
+         Thread {
+             Store.ensureLoaded(applicationContext)
+             val wait = Math.max(0L, 700 - (System.currentTimeMillis() - t0))
+-            ui.postDelayed({ if (!isFinishing) { applyBars(); start(0); openPending() } }, wait)
++            ui.postDelayed({ if (!isFinishing) { applyBars(); start(0); openPending(); openNewNote(); offerNotifications() } }, wait)
+         }.start()
+     }
+ 
+@@ -101,7 +109,28 @@ class MainActivity : Activity(), MainActivityLike {
+         super.onNewIntent(intent)
+         setIntent(intent)
+         pendingBook = bookUriOf(intent)
+-        if (tabs != null) openPending()
++        pendingNewNote = intent.getBooleanExtra(Reminders.EXTRA_NEW_NOTE, false)
++        if (tabs != null) { openPending(); openNewNote() }
++    }
++
++    /** Tapping the morning "write something" notification lands straight in a blank note. */
++    private fun openNewNote() {
++        if (!pendingNewNote) return
++        pendingNewNote = false
++        intent = Intent()
++        push(EditorScreen(this, Store.addNote(null).id))
++    }
++
++    /** One friendly explanation before the Android 13+ permission dialog, shown a single time. */
++    private fun offerNotifications() {
++        if (Store.notifAsked || Reminders.hasPermission(this)) return
++        Store.notifAsked = true; Store.saveState()
++        val s = Sheet(this, L("Stay on track", "Restez régulier"))
++        s.body.put(text(L("Notia can remind you to write a note each morning, finish your tasks and get back to your books. You can change this any time in Settings.",
++            "Notia peut vous rappeler d’écrire une note chaque matin, de terminer vos tâches et de reprendre vos livres. Vous pouvez changer cela à tout moment dans les réglages."), 15f, Th.sub).apply { setLineSpacing(0f, 1.2f) }, MATCH, WRAP, 0f, 0, 0, 0, 16)
++        s.body.put(pill(L("Enable notifications", "Activer les notifications")) { s.dismiss(); requestNotifPermission { } })
++        s.body.put(pill(L("Not now", "Plus tard"), false) { s.dismiss() }, MATCH, WRAP, 0f, 0, 8, 0, 0)
++        s.show()
+     }
+ 
+     /** Adds the file to the library (once) and opens it in the reader. */
+@@ -182,8 +211,20 @@ class MainActivity : Activity(), MainActivityLike {
+         if (requestCode == 21) { val cb = permCb; permCb = null; cb?.invoke(grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) }
+     }
+ 
+-    override fun onResume() { super.onResume(); resumed = true; if (Store.loaded) Reminders.scheduleReading(this) }
+-    override fun onPause() { resumed = false; if (Store.loaded) Store.flush(); super.onPause() }
++    override fun onResume() {
++        super.onResume(); resumed = true
++        if (Store.loaded) { Store.lastOpen = System.currentTimeMillis(); Reminders.scheduleAll(this) }
++    }
++
++    override fun onPause() {
++        resumed = false
++        if (Store.loaded) {
++            // remember when the app was last used: the "come back" reminder counts days from here
++            Store.lastOpen = System.currentTimeMillis(); Store.saveState(); Store.flush()
++            Reminders.scheduleIdle(this)
++        }
++        super.onPause()
++    }
+     override fun onStop() { tabs?.lockVault(); super.onStop() }
+ 
+     override fun onDestroy() { stack.forEach { it.onDestroy() }; super.onDestroy() }
+diff --git a/app/src/main/java/com/notia/mobile/core/Store.kt b/app/src/main/java/com/notia/mobile/core/Store.kt
+index cbd466d..f7cd099 100644
+--- a/app/src/main/java/com/notia/mobile/core/Store.kt
++++ b/app/src/main/java/com/notia/mobile/core/Store.kt
+@@ -38,6 +38,15 @@ object Store {
+     var lang = "en"
+     var dark = true
+     var purged = 0
++    // ---- user preferences (saved in state.json) ----
++    var remMorning = true        // daily "write a note / idea" reminder
++    var morningHour = 8
++    var morningMin = 0
++    var remInactive = true       // "come back" nudges after days away
++    var remBooks = true          // evening "finish your book" reminder
++    var toolsAll = false         // editor toolbar: false = basics only, true = every tool
++    var notifAsked = false       // the first-launch notification prompt was shown
++    var lastOpen = 0L            // when the app was last used (drives the "come back" nudges)
+     @Volatile var loaded = false
+     private val listeners = ArrayList<() -> Unit>()
+     private val handler = Handler(Looper.getMainLooper())
+@@ -70,6 +79,9 @@ object Store {
+     private fun readAll() {
+         (readJson(File(dir, "state.json")) as? JSONObject)?.let { s ->
+             lang = s.optString("lang", lang); dark = s.optBoolean("dark", true)
++            remMorning = s.optBoolean("remMorning", true); morningHour = s.optInt("morningHour", 8).coerceIn(0, 23); morningMin = s.optInt("morningMin", 0).coerceIn(0, 59)
++            remInactive = s.optBoolean("remInactive", true); remBooks = s.optBoolean("remBooks", true)
++            toolsAll = s.optBoolean("toolsAll", false); notifAsked = s.optBoolean("notifAsked", false); lastOpen = s.optLong("lastOpen", 0L)
+             s.optJSONArray("cats")?.let { a -> for (i in 0 until a.length()) a.getJSONObject(i).let { cats.add(Cat(it.getString("id"), it.getString("name"), it.optString("color", CAT_COLORS[0]))) } }
+         }
+         File(dir, "notes").listFiles()?.forEach { f ->
+@@ -157,6 +169,8 @@ object Store {
+         val jobs = ArrayList<Pair<File, String>>(); val dels = ArrayList<File>()
+         for (k in dirty) when {
+             k == "state" -> jobs.add(File(dir, "state.json") to JSONObject().put("lang", lang).put("dark", dark)
++                .put("remMorning", remMorning).put("morningHour", morningHour).put("morningMin", morningMin).put("remInactive", remInactive).put("remBooks", remBooks)
++                .put("toolsAll", toolsAll).put("notifAsked", notifAsked).put("lastOpen", lastOpen)
+                 .put("cats", JSONArray().also { a -> cats.forEach { a.put(JSONObject().put("id", it.id).put("name", it.name).put("color", it.color)) } }).toString())
+             k == "tasks" -> jobs.add(File(dir, "tasks.json") to JSONArray().also { a -> tasks.forEach { a.put(JSONObject().put("id", it.id).put("title", it.title).put("due", it.due ?: JSONObject.NULL).put("done", it.done).put("armed", it.armed)) } }.toString())
+             k == "lib" -> jobs.add(File(dir, "library.json") to JSONArray().also { a -> books.forEach { b ->
+diff --git a/app/src/main/java/com/notia/mobile/sys/Reminders.kt b/app/src/main/java/com/notia/mobile/sys/Reminders.kt
+index e6b5791..f839bcb 100644
+--- a/app/src/main/java/com/notia/mobile/sys/Reminders.kt
++++ b/app/src/main/java/com/notia/mobile/sys/Reminders.kt
+@@ -26,7 +26,17 @@ object Reminders {
+     const val ACT_READ = "com.notia.mobile.READING"
+     const val ACT_DONE = "com.notia.mobile.TASK_DONE"
+     const val ACT_SNOOZE = "com.notia.mobile.TASK_SNOOZE"
++    const val CH_NOTE = "daily_note"
++    const val CH_IDLE = "come_back"
++    const val ACT_MORNING = "com.notia.mobile.MORNING"
++    const val ACT_IDLE = "com.notia.mobile.IDLE"
++    /** Extra on the notification tap intent: open a blank note straight away. */
++    const val EXTRA_NEW_NOTE = "com.notia.mobile.NEW_NOTE"
+     private const val READ_HOUR = 19
++    private const val IDLE_HOUR = 18
++    private const val DAY = 86_400_000L
++    /** Days away after which Notia nudges the user (then stops, so it never nags forever). */
++    private val IDLE_STEPS = intArrayOf(3, 7, 14, 30)
+ 
+     fun channels(ctx: Context) {
+         if (Build.VERSION.SDK_INT < 26) return
+@@ -39,6 +49,8 @@ object Reminders {
+             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+         })
+         nm.createNotificationChannel(NotificationChannel(CH_READ, if (Store.lang == "fr") "Rappels de lecture" else "Reading reminders", NotificationManager.IMPORTANCE_DEFAULT))
++        nm.createNotificationChannel(NotificationChannel(CH_NOTE, if (Store.lang == "fr") "Rappel d’écriture du matin" else "Morning writing reminder", NotificationManager.IMPORTANCE_DEFAULT))
++        nm.createNotificationChannel(NotificationChannel(CH_IDLE, if (Store.lang == "fr") "On se retrouve ?" else "Come-back reminders", NotificationManager.IMPORTANCE_LOW))
+     }
+ 
+     fun hasPermission(ctx: Context) = Build.VERSION.SDK_INT < 33 || ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+@@ -75,16 +87,45 @@ object Reminders {
+     fun scheduleReading(ctx: Context) {
+         val am = ctx.getSystemService(AlarmManager::class.java)
+         val p = pi(ctx, ACT_READ, "daily")
+-        if (topBook() == null) { am.cancel(p); return }
++        if (!Store.remBooks || topBook() == null) { am.cancel(p); return }
+         val c = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, READ_HOUR); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
+         if (c.timeInMillis <= System.currentTimeMillis() + 60_000) c.add(Calendar.DAY_OF_YEAR, 1)
+         am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, c.timeInMillis, p)
+     }
+ 
++    private fun nextAt(hour: Int, minute: Int): Long {
++        val c = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, hour); set(Calendar.MINUTE, minute); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
++        if (c.timeInMillis <= System.currentTimeMillis() + 60_000) c.add(Calendar.DAY_OF_YEAR, 1)
++        return c.timeInMillis
++    }
++
++    /** Every morning: "got an idea? write it down". */
++    fun scheduleMorning(ctx: Context) {
++        val am = ctx.getSystemService(AlarmManager::class.java)
++        val p = pi(ctx, ACT_MORNING, "daily")
++        if (!Store.remMorning) { am.cancel(p); return }
++        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, nextAt(Store.morningHour, Store.morningMin), p)
++    }
++
++    /** Whole days since the app was last used, rounded so an alarm that fires a little early still counts. */
++    private fun daysAway(): Int = if (Store.lastOpen <= 0L) 0 else Math.round((System.currentTimeMillis() - Store.lastOpen) / DAY.toDouble()).toInt()
++
++    /** Arms the next "we miss you" nudge (after 3, 7, 14 and 30 days away). Opening the app resets the countdown. */
++    fun scheduleIdle(ctx: Context) {
++        val am = ctx.getSystemService(AlarmManager::class.java)
++        val p = pi(ctx, ACT_IDLE, "idle")
++        val next = IDLE_STEPS.firstOrNull { it > daysAway() }
++        if (!Store.remInactive || Store.lastOpen <= 0L || next == null) { am.cancel(p); return }
++        val c = Calendar.getInstance().apply { timeInMillis = Store.lastOpen; add(Calendar.DAY_OF_YEAR, next); set(Calendar.HOUR_OF_DAY, IDLE_HOUR); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
++        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, Math.max(c.timeInMillis, System.currentTimeMillis() + 60_000), p)
++    }
++
++    fun scheduleAll(ctx: Context) { scheduleReading(ctx); scheduleMorning(ctx); scheduleIdle(ctx) }
++
+     fun rescheduleAll(ctx: Context) {
+         val now = System.currentTimeMillis()
+         for (t in Store.tasks) if (!t.done && t.due != null && t.due!! > now) { t.armed = true; schedule(ctx, t.id, t.due!!) } else if (t.armed) t.armed = false
+-        scheduleReading(ctx)
++        scheduleAll(ctx)
+     }
+ 
+     /** Asks for the notification permission on Android 13+, then calls back with whether it is usable. */
+@@ -102,15 +143,17 @@ object Reminders {
+     /** Task alarm: rings, vibrates and offers Done and Snooze 10 min. */
+     fun showTask(ctx: Context, taskId: String, title: String) {
+         val fr = Store.lang == "fr"
+-        show(ctx, CH_TASKS, taskId.hashCode(), if (fr) "Tâche à terminer" else "Time to finish your task", title) { b ->
++        show(ctx, CH_TASKS, taskId.hashCode(), if (fr) "Tâche à terminer" else "Time to finish your task", title, false) { b ->
+             b.setCategory(Notification.CATEGORY_REMINDER)
+             b.addAction(action(ctx, ACT_DONE, taskId, if (fr) "Terminé" else "Done", R.drawable.ic_check))
+             b.addAction(action(ctx, ACT_SNOOZE, taskId, if (fr) "Reporter 10 min" else "Snooze 10 min", R.drawable.ic_clock))
+         }
+     }
+ 
+-    fun show(ctx: Context, channel: String, id: Int, title: String, text: String, extra: (Notification.Builder) -> Unit = {}) {
+-        val open = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
++    fun show(ctx: Context, channel: String, id: Int, title: String, text: String, newNote: Boolean = false, extra: (Notification.Builder) -> Unit = {}) {
++        val tap = Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP).putExtra(EXTRA_NEW_NOTE, newNote)
++        // own request code per notification, otherwise FLAG_UPDATE_CURRENT would overwrite the extras of the others
++        val open = PendingIntent.getActivity(ctx, id, tap, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+         val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(ctx, channel) else @Suppress("DEPRECATION") Notification.Builder(ctx).setPriority(Notification.PRIORITY_HIGH).setDefaults(Notification.DEFAULT_ALL)
+         b.setSmallIcon(R.drawable.ic_stat).setContentTitle(title).setContentText(text).setStyle(Notification.BigTextStyle().bigText(text))
+             .setContentIntent(open).setAutoCancel(true)
+@@ -146,14 +189,51 @@ class ReminderReceiver : BroadcastReceiver() {
+             }
+             Reminders.ACT_READ -> {
+                 val b = Reminders.topBook()
+-                if (b != null) Reminders.show(ctx, Reminders.CH_READ, 7001, "Notia",
+-                    if (fr) "Terminer « ${b.title} » ce soir ? Vous en avez lu ${Math.round(b.pct * 100)} %." else "Finish \"${b.title}\" tonight? You are ${Math.round(b.pct * 100)}% through.")
++                // stay quiet when the person already read today
++                if (Store.remBooks && b != null && !sameDay(b.last, System.currentTimeMillis())) {
++                    val pc = Math.round(b.pct * 100)
++                    val msgs = if (fr) listOf("Terminer « ${b.title} » ce soir ? Vous en avez lu $pc %.", "« ${b.title} » vous attend : $pc % lus. Quelques pages ce soir ?", "Un petit moment de lecture ? Reprenez « ${b.title} » là où vous vous êtes arrêté.")
++                               else listOf("Finish \"${b.title}\" tonight? You are $pc% through.", "\"${b.title}\" is waiting: $pc% read. A few pages tonight?", "Time for a reading break? Pick \"${b.title}\" back up where you left off.")
++                    Reminders.show(ctx, Reminders.CH_READ, 7001, if (fr) "Finissez votre livre" else "Finish your book", msgs[dayOfYear() % msgs.size])
++                }
+                 Reminders.scheduleReading(ctx)
+             }
++            Reminders.ACT_MORNING -> {
++                // no nudge when a note was already written today
++                val now = System.currentTimeMillis()
++                if (Store.remMorning && Store.notes.none { sameDay(it.created, now) }) {
++                    val msgs = if (fr) listOf("Une idée, une pensée, une liste ? Notez-la avant qu’elle ne s’envole.", "Bonjour ! Qu’avez-vous en tête ce matin ? Écrivez-le en 10 secondes.", "Commencez la journée en écrivant trois choses importantes.", "Une nouvelle journée, une nouvelle page. Que voulez-vous retenir aujourd’hui ?", "Et si vous notiez l’idée qui vous trotte dans la tête ?")
++                               else listOf("Got an idea, a thought, a to-do? Write it down before it escapes.", "Good morning! What's on your mind? Capture it in 10 seconds.", "Start the day by writing down your three most important things.", "A fresh day, a fresh page. What do you want to remember today?", "Why not jot down that idea floating around in your head?")
++                    Reminders.show(ctx, Reminders.CH_NOTE, 7002, if (fr) "Bonjour ☀️" else "Good morning ☀️", msgs[dayOfYear() % msgs.size], true)
++                }
++                Reminders.scheduleMorning(ctx)
++            }
++            Reminders.ACT_IDLE -> {
++                val away = if (Store.lastOpen <= 0L) 0 else ((System.currentTimeMillis() - Store.lastOpen) / 86_400_000L).toInt()
++                if (Store.remInactive && away >= 2) {
++                    val open = Store.tasks.count { !it.done }
++                    val b = Reminders.topBook()
++                    val text = when {
++                        open > 0 -> if (fr) "Vous avez $open tâche(s) en attente. Revenez les terminer." else "You have $open unfinished task(s) waiting for you."
++                        b != null -> if (fr) "Reprenez « ${b.title} » : ${Math.round(b.pct * 100)} % lus." else "Pick \"${b.title}\" back up: you are ${Math.round(b.pct * 100)}% through."
++                        else -> if (fr) "Vos notes vous attendent. Une idée à noter ?" else "Your notes miss you. Got an idea to capture?"
++                    }
++                    Reminders.show(ctx, Reminders.CH_IDLE, 7003, if (fr) "Notia vous attend" else "Notia misses you", text, false)
++                }
++                Reminders.scheduleIdle(ctx)
++            }
+         }
+     }
+ }
+ 
++private fun sameDay(a: Long, b: Long): Boolean {
++    if (a <= 0L) return false
++    val x = Calendar.getInstance().apply { timeInMillis = a }; val y = Calendar.getInstance().apply { timeInMillis = b }
++    return x.get(Calendar.YEAR) == y.get(Calendar.YEAR) && x.get(Calendar.DAY_OF_YEAR) == y.get(Calendar.DAY_OF_YEAR)
++}
++
++private fun dayOfYear() = Calendar.getInstance().get(Calendar.DAY_OF_YEAR)
++
+ /** Alarms are cleared on reboot and on app update; this restores them. */
+ class BootReceiver : BroadcastReceiver() {
+     override fun onReceive(ctx: Context, intent: Intent) {
+diff --git a/app/src/main/java/com/notia/mobile/ui/EditorScreen.kt b/app/src/main/java/com/notia/mobile/ui/EditorScreen.kt
+index b0d30de..157083a 100644
+--- a/app/src/main/java/com/notia/mobile/ui/EditorScreen.kt
++++ b/app/src/main/java/com/notia/mobile/ui/EditorScreen.kt
+@@ -17,6 +17,7 @@ import android.webkit.WebView
+ import android.webkit.WebViewClient
+ import android.widget.EditText
+ import android.widget.FrameLayout
++import android.widget.ImageView
+ import android.widget.LinearLayout
+ import android.widget.TextView
+ import com.notia.mobile.MainActivity
+@@ -92,24 +93,19 @@ class EditorScreen(private val a: MainActivity, private val id: String) : Screen
+ 
+     init {
+         val n = note
+-        // top bar
+-        val top = a.hbox { setPadding(a.dp(8), a.dp(8), a.dp(8), 0) }
+-        top.put(a.iconBtn(R.drawable.ic_back, L("Back", "Retour"), Th.ink, 24) { onBack() })
+-        top.put(View(a), 0, 1, 1f)
+-        top.put(a.iconBtn(R.drawable.ic_share, L("Share", "Partager"), Th.ink) { share() })
+-        top.put(a.iconBtn(R.drawable.ic_delete, L("Delete", "Supprimer"), Th.danger) {
+-            a.confirm(L("Delete this note?", "Supprimer cette note ?"), null, L("Delete", "Supprimer")) { done = true; Store.removeNote(id); a.pop() }
+-        })
+-        root.put(top)
++        // top bar: back on the left, share and delete on the right, all 44dp and vertically centred
++        root.put(a.pageHeader({ onBack() }, null,
++            a.iconBtn(R.drawable.ic_share, L("Share", "Partager"), Th.ink) { share() },
++            a.iconBtn(R.drawable.ic_delete, L("Delete", "Supprimer"), Th.danger) {
++                a.confirm(L("Delete this note?", "Supprimer cette note ?"), null, L("Delete", "Supprimer")) { done = true; Store.removeNote(id); a.pop() }
++            }))
+         root.put(title, MATCH, WRAP, 0f, 0, 4, 0, 0)
+         title.addTextChangedListener(object : TextWatcher {
+             override fun afterTextChanged(s: Editable?) { val nn = note ?: return; val t = s?.toString() ?: ""; if (nn.title != t) { nn.title = t; Store.touch(nn); updateMeta() } }
+             override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, af: Int) {}
+             override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+         })
+-        val hs = a.hscroll { setPadding(a.dp(20), 0, a.dp(20), 0) }
+-        hs.removeAllViews(); hs.addView(chips, FrameLayout.LayoutParams(WRAP, WRAP))
+-        root.put(hs, MATCH, WRAP, 0f, 0, 6, 0, 6)
++        root.put(a.chipScroller(chips), MATCH, WRAP, 0f, 0, 6, 0, 8)
+         drawChips()
+ 
+         // web editor
+@@ -127,32 +123,47 @@ class EditorScreen(private val a: MainActivity, private val id: String) : Screen
+         root.put(meta, MATCH, WRAP, 0f, 20, 4, 20, 6)
+         updateMeta()
+ 
+-        // toolbars
+-        val bar = a.vbox { background = a.rounded(Th.card, 0f); setPadding(0, a.dp(4), 0, a.dp(4)) }
+-        bar.put(a.hscroll {
+-            setPadding(a.dp(8), 0, a.dp(8), 0)
+-            put(a.iconBtn(R.drawable.ic_image, L("Image", "Image"), Th.accent) { pickImage() })
+-            put(a.iconBtn(R.drawable.ic_link, L("Link", "Lien"), Th.accent) { linkSheet() })
+-            put(a.iconBtn(R.drawable.ic_table, L("Table", "Tableau"), Th.accent) { tableSheet() })
+-            put(a.iconBtn(R.drawable.ic_calc, L("Formula", "Formule"), Th.accent) { formulaSheet() })
+-            put(a.iconBtn(R.drawable.ic_chart, L("Chart", "Graphique"), Th.accent) { chartSheet() })
+-            put(View(a), a.dp(10), 1)
+-            for (c in listOf(Th.ink, 0xFFE5484D.toInt(), 0xFFF2B33D.toInt(), 0xFF3FBF7F.toInt(), 0xFF3DA5E0.toInt(), 0xFF8B6CF6.toInt())) put(swatch(c, true), a.dp(30), a.dp(30), 0f, 3, 0, 3, 0)
+-            put(View(a), a.dp(10), 1)
+-            for (c in listOf(0xFFFFF3A3.toInt(), 0xFFC9F3D5.toInt(), 0xFFCDE6FF.toInt(), 0xFFFFD3E2.toInt(), 0)) put(swatch(c, false), a.dp(30), a.dp(30), 0f, 3, 0, 3, 0)
+-        })
+-        bar.put(a.hscroll {
+-            setPadding(a.dp(8), 0, a.dp(8), 0)
+-            put(a.iconBtn(R.drawable.ic_undo, L("Undo", "Annuler"), Th.ink) { js("cmd('undo')") })
+-            put(a.iconBtn(R.drawable.ic_redo, L("Redo", "Rétablir"), Th.ink) { js("cmd('redo')") })
+-            put(tbtn("H1", Typeface.BOLD) { js("block('h1')") }); put(tbtn("H2", Typeface.BOLD) { js("block('h2')") })
+-            put(tbtn("B", Typeface.BOLD) { js("cmd('bold')") }); put(tbtn("I", Typeface.ITALIC) { js("cmd('italic')") })
+-            put(tbtn("U", Typeface.NORMAL, true) { js("cmd('underline')") })
+-            put(a.iconBtn(R.drawable.ic_bullets, L("Bullets", "Puces"), Th.ink) { js("cmd('insertUnorderedList')") })
+-            put(a.iconBtn(R.drawable.ic_numbered, L("Numbered list", "Liste numérotée"), Th.ink) { js("cmd('insertOrderedList')") })
+-            put(a.iconBtn(R.drawable.ic_code, L("Code", "Code"), Th.ink) { js("block('pre')") })
+-            put(a.iconBtn(R.drawable.ic_hr, L("Line", "Ligne"), Th.ink) { js("cmd('insertHorizontalRule')") })
+-        })
++        // toolbar: the basics are always one row; "all tools" opens a second panel above it
++        val bar = a.vbox { background = barBg(); elevation = a.dpf(8f); setPadding(a.dp(6), a.dp(6), a.dp(6), a.dp(6)) }
++        val extra = a.vbox {
++            put(cells(
++                tText("H1", Typeface.BOLD, desc = L("Heading 1", "Titre 1")) { js("block('h1')") },
++                tText("H2", Typeface.BOLD, desc = L("Heading 2", "Titre 2")) { js("block('h2')") },
++                tIcon(R.drawable.ic_code, L("Code", "Code")) { js("block('pre')") },
++                tIcon(R.drawable.ic_hr, L("Line", "Ligne")) { js("cmd('insertHorizontalRule')") },
++                tIcon(R.drawable.ic_link, L("Link", "Lien"), Th.accent) { linkSheet() },
++                tIcon(R.drawable.ic_image, L("Image", "Image"), Th.accent) { pickImage() },
++            ))
++            put(cells(
++                tIcon(R.drawable.ic_table, L("Table", "Tableau"), Th.accent) { tableSheet() },
++                tIcon(R.drawable.ic_calc, L("Formula", "Formule"), Th.accent) { formulaSheet() },
++                tIcon(R.drawable.ic_chart, L("Chart", "Graphique"), Th.accent) { chartSheet() },
++                tText("A", Typeface.BOLD, true, L("Text colour", "Couleur du texte"), 0xFFE5484D.toInt()) { swatchSheet(true) },
++                highlightBtn(),
++                tText("Tx", Typeface.NORMAL, false, L("Clear formatting", "Effacer la mise en forme"), Th.sub) { js("cmd('removeFormat')") },
++            ))
++            put(View(a).apply { setBackgroundColor(Th.line) }, MATCH, 1, 0f, 8, 4, 8, 4)
++        }
++        val chevron = ImageView(a).apply { setImageResource(R.drawable.ic_expand); setColorFilter(Th.accent) }
++        val toggle = FrameLayout(a).apply {
++            isClickable = true
++            // inset background: the touch area stays a full cell, the visible tile is slightly smaller
++            background = android.graphics.drawable.InsetDrawable(a.pressable(Th.field, 12f), a.dp(3))
++            addView(chevron, FrameLayout.LayoutParams(a.dp(22), a.dp(22), Gravity.CENTER))
++        }
++        toggle.setOnClickListener { Store.toolsAll = !Store.toolsAll; Store.saveState(); applyTools(bar, extra, chevron, toggle, true) }
++        bar.put(extra)
++        bar.put(cells(
++            tIcon(R.drawable.ic_undo, L("Undo", "Annuler")) { js("cmd('undo')") },
++            tIcon(R.drawable.ic_redo, L("Redo", "Rétablir")) { js("cmd('redo')") },
++            tText("B", Typeface.BOLD, desc = L("Bold", "Gras")) { js("cmd('bold')") },
++            tText("I", Typeface.ITALIC, desc = L("Italic", "Italique")) { js("cmd('italic')") },
++            tText("U", Typeface.NORMAL, true, L("Underline", "Souligné")) { js("cmd('underline')") },
++            tIcon(R.drawable.ic_bullets, L("Bullets", "Puces")) { js("cmd('insertUnorderedList')") },
++            tIcon(R.drawable.ic_numbered, L("Numbered list", "Liste numérotée")) { js("cmd('insertOrderedList')") },
++            toggle,
++        ))
++        applyTools(bar, extra, chevron, toggle, false)
+         root.put(bar)
+ 
+         val html = Pages.load(a, "editor.html", mapOf("%NONCE%" to Pages.nonce(), "%BG%" to cssColor(Th.bg), "%INK%" to cssColor(Th.ink), "%SUB%" to cssColor(Th.sub),
+@@ -161,24 +172,70 @@ class EditorScreen(private val a: MainActivity, private val id: String) : Screen
+         if (n == null) a.post(Runnable { a.pop() })
+     }
+ 
+-    private fun tbtn(label: String, style: Int, underline: Boolean = false, onClick: () -> Unit): TextView = a.text(label, 16f, Th.ink, true).apply {
++    private fun barBg() = GradientDrawable().apply {
++        val r = a.dpf(22f); cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
++        setColor(Th.card); setStroke(a.dp(1), Th.line)
++    }
++
++    /** Shows or hides the "all tools" panel and points the chevron the right way. */
++    private fun applyTools(bar: LinearLayout, extra: View, chevron: View, toggle: View, animate: Boolean) {
++        if (animate) android.transition.TransitionManager.beginDelayedTransition(bar)
++        val all = Store.toolsAll
++        extra.visibility = if (all) View.VISIBLE else View.GONE
++        chevron.rotation = if (all) 180f else 0f
++        toggle.contentDescription = if (all) L("Show basic tools only", "Afficher les outils de base") else L("Show all tools", "Afficher tous les outils")
++    }
++
++    /** A row of equally wide, 44dp-tall cells so every button gets the same comfortable touch area. */
++    private fun cells(vararg c: View): LinearLayout = a.hbox().also { r -> for (v in c) r.put(v, 0, a.dp(44), 1f) }
++
++    private fun tIcon(res: Int, desc: String, tint: Int = Th.ink, onClick: () -> Unit): View = FrameLayout(a).apply {
++        contentDescription = desc; isClickable = true; background = a.pressable(Color.TRANSPARENT, 12f)
++        addView(android.widget.ImageView(a).apply { setImageResource(res); setColorFilter(tint) }, FrameLayout.LayoutParams(a.dp(22), a.dp(22), Gravity.CENTER))
++        setOnClickListener { onClick() }
++    }
++
++    private fun tText(label: String, style: Int, underline: Boolean = false, desc: String = label, color: Int = Th.ink, onClick: () -> Unit): View = a.text(label, 16f, color, true).apply {
+         setTypeface(Typeface.DEFAULT, if (style == Typeface.NORMAL) Typeface.BOLD else style)
+         if (underline) paintFlags = paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
+-        gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(a.dp(44), a.dp(44)); isClickable = true; contentDescription = label
++        gravity = Gravity.CENTER; isClickable = true; contentDescription = desc; background = a.pressable(Color.TRANSPARENT, 12f)
+         setOnClickListener { onClick() }
+     }
+ 
+-    private fun swatch(color: Int, ink: Boolean): View = View(a).apply {
+-        background = GradientDrawable().apply {
+-            shape = if (ink) GradientDrawable.OVAL else GradientDrawable.RECTANGLE
+-            if (!ink) cornerRadius = a.dpf(8f)
+-            if (color == 0) { setColor(Color.TRANSPARENT); setStroke(a.dp(2), Th.sub) } else { setColor(color); setStroke(a.dp(1), Th.line) }
+-        }
+-        isClickable = true
+-        contentDescription = if (ink) L("Text colour", "Couleur du texte") else L("Highlight", "Surlignage")
+-        setOnClickListener {
+-            if (ink) js("cmd('foreColor','${cssColor(color)}')") else js("cmd('hiliteColor','${if (color == 0) "transparent" else cssColor(color)}')")
++    private fun highlightBtn(): View = FrameLayout(a).apply {
++        contentDescription = L("Highlight", "Surlignage"); isClickable = true; background = a.pressable(Color.TRANSPARENT, 12f)
++        addView(a.text("A", 15f, 0xFF1B1830.toInt(), true).apply { gravity = Gravity.CENTER; background = a.rounded(0xFFFFE08A.toInt(), 8f) }, FrameLayout.LayoutParams(a.dp(28), a.dp(28), Gravity.CENTER))
++        setOnClickListener { swatchSheet(false) }
++    }
++
++    /** Colour picker: big, labelled swatches instead of 11 tiny dots in a scrolling row. */
++    private fun swatchSheet(ink: Boolean) {
++        val s = Sheet(a, if (ink) L("Text colour", "Couleur du texte") else L("Highlight", "Surlignage"))
++        val colors: List<Int> = if (ink)
++            listOf(Th.ink, 0xFFE5484D.toInt(), 0xFFF76B15.toInt(), 0xFFF2B33D.toInt(), 0xFF3FBF7F.toInt(), 0xFF12A594.toInt(), 0xFF3DA5E0.toInt(), 0xFF3E63DD.toInt(), 0xFF8B6CF6.toInt(), 0xFFEF6B9A.toInt())
++        else listOf(0xFFFFF3A3.toInt(), 0xFFC9F3D5.toInt(), 0xFFCDE6FF.toInt(), 0xFFFFD3E2.toInt(), 0xFFFFE0B8.toInt(), 0xFFE4D9FF.toInt(), 0)
++        for (chunk in colors.chunked(5)) {
++            val r = a.hbox()
++            for (c in chunk) r.put(FrameLayout(a).apply {
++                isClickable = true
++                contentDescription = if (ink) L("Text colour", "Couleur du texte") else L("Highlight", "Surlignage")
++                background = a.pressable(Color.TRANSPARENT, 14f)
++                addView(View(a).apply {
++                    background = GradientDrawable().apply {
++                        shape = GradientDrawable.OVAL
++                        if (c == 0) { setColor(Color.TRANSPARENT); setStroke(a.dp(2), Th.sub) } else { setColor(c); setStroke(a.dp(1), Th.line) }
++                    }
++                }, FrameLayout.LayoutParams(a.dp(40), a.dp(40), Gravity.CENTER))
++                if (c == 0) addView(a.text("✕", 14f, Th.sub, true), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER))
++                setOnClickListener {
++                    if (ink) js("cmd('foreColor','${cssColor(c)}')") else js("cmd('hiliteColor','${if (c == 0) "transparent" else cssColor(c)}')")
++                    s.dismiss()
++                }
++            }, 0, a.dp(56), 1f)
++            repeat(5 - chunk.size) { r.put(View(a), 0, a.dp(56), 1f) }
++            s.body.put(r)
+         }
++        s.show()
+     }
+ 
+     private fun drawChips() {
+diff --git a/app/src/main/java/com/notia/mobile/ui/LibraryScreen.kt b/app/src/main/java/com/notia/mobile/ui/LibraryScreen.kt
+index 4da37c6..166bbe0 100644
+--- a/app/src/main/java/com/notia/mobile/ui/LibraryScreen.kt
++++ b/app/src/main/java/com/notia/mobile/ui/LibraryScreen.kt
+@@ -81,10 +81,8 @@ class LibraryScreen(private val a: MainActivity) : Screen() {
+     }
+ 
+     init {
+-        val head = a.hbox { setPadding(a.dp(20), a.dp(18), a.dp(20), 0) }
+-        head.put(a.text(L("Library", "Bibliothèque"), 30f, Th.ink, true), 0, WRAP, 1f)
+-        root.put(head)
+-        root.put(stats, MATCH, WRAP, 0f, 20, 14, 20, 8)
++        root.put(a.tabHeader(L("Library", "Bibliothèque")))
++        root.put(stats, MATCH, WRAP, 0f, 20, 8, 20, 8)
+         list.divider = null; list.dividerHeight = 0; list.clipToPadding = false; list.selector = android.graphics.drawable.ColorDrawable(0)
+         list.setPadding(a.dp(20), a.dp(4), a.dp(20), a.dp(170)); list.adapter = adapter
+         val body = FrameLayout(a)
+diff --git a/app/src/main/java/com/notia/mobile/ui/ReaderScreen.kt b/app/src/main/java/com/notia/mobile/ui/ReaderScreen.kt
+index c87216c..34c6b0a 100644
+--- a/app/src/main/java/com/notia/mobile/ui/ReaderScreen.kt
++++ b/app/src/main/java/com/notia/mobile/ui/ReaderScreen.kt
+@@ -61,24 +61,24 @@ class ReaderScreen(private val a: MainActivity, bookId: String) : Screen() {
+     init {
+         val b = book
+         val col = a.vbox()
+-        val top = a.hbox { setPadding(a.dp(8), a.dp(8), a.dp(16), a.dp(4)) }
+-        top.put(a.iconBtn(R.drawable.ic_back, L("Back", "Retour"), Th.ink, 24) { a.pop() })
+-        top.put(a.vbox {
+-            put(a.text(b?.title ?: "", 15f, Th.ink, true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
++        col.put(a.pageHeader({ a.pop() }, a.vbox {
++            put(a.text(b?.title ?: "", 16f, Th.ink, true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
+             put(stats, MATCH, WRAP, 0f, 0, 3, 0, 0)
+-        }, 0, WRAP, 1f)
+-        col.put(top)
++        }))
+         col.put(content, MATCH, 0, 1f)
+         root.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
+ 
++        // glass toolbar: translucent tint, soft sheen and a hairline edge, floating above the page
+         val pill = a.hbox {
+-            background = a.rounded(Th.p.nav, 28f); elevation = a.dpf(10f); setPadding(a.dp(8), 0, a.dp(8), 0)
+-            put(a.iconBtn(R.drawable.ic_pen, L("Highlight", "Surligner"), 0xFFF2B33D.toInt()) { highlight() })
+-            put(a.iconBtn(R.drawable.ic_bookmark, L("Bookmark", "Marque-page"), 0xFFFFFFFF.toInt()) { bookmark() })
+-            put(a.iconBtn(R.drawable.ic_bullets, L("Contents, bookmarks and highlights", "Sommaire, marque-pages et surlignages"), 0xFFFFFFFF.toInt()) { panel(0) })
++            background = a.glass(32f); elevation = a.dpf(10f); setPadding(a.dp(10), a.dp(6), a.dp(10), a.dp(6))
++            put(a.iconBtn(R.drawable.ic_pen, L("Highlight", "Surligner"), 0xFFF2B33D.toInt(), 22) { highlight() }, a.dp(48), a.dp(48), 0f, 0, 0, 4, 0)
++            put(View(a).apply { setBackgroundColor(if (Store.dark) 0x33FFFFFF else 0x22000000) }, 1, a.dp(24), 0f, 0, 0, 4, 0)
++            put(a.iconBtn(R.drawable.ic_bookmark, L("Bookmark", "Marque-page"), Th.ink, 22) { bookmark() }, a.dp(48), a.dp(48), 0f, 0, 0, 4, 0)
++            put(View(a).apply { setBackgroundColor(if (Store.dark) 0x33FFFFFF else 0x22000000) }, 1, a.dp(24), 0f, 0, 0, 4, 0)
++            put(a.iconBtn(R.drawable.ic_bullets, L("Contents, bookmarks and highlights", "Sommaire, marque-pages et surlignages"), Th.ink, 22) { panel(0) }, a.dp(48), a.dp(48))
+         }
+-        bar.addView(pill, FrameLayout.LayoutParams(WRAP, a.dp(56), Gravity.CENTER))
+-        root.addView(bar, FrameLayout.LayoutParams(WRAP, a.dp(56), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also { it.bottomMargin = a.dp(20) })
++        bar.addView(pill, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER))
++        root.addView(bar, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also { it.bottomMargin = a.dp(24) })
+         updateStats()
+         if (b == null) message(L("This book is no longer in the library.", "Ce livre n’est plus dans la bibliothèque."), false) else open(b)
+     }
+diff --git a/app/src/main/java/com/notia/mobile/ui/Screens2.kt b/app/src/main/java/com/notia/mobile/ui/Screens2.kt
+index bdf2a26..a5cbeee 100644
+--- a/app/src/main/java/com/notia/mobile/ui/Screens2.kt
++++ b/app/src/main/java/com/notia/mobile/ui/Screens2.kt
+@@ -43,20 +43,19 @@ class TasksScreen(private val a: MainActivity) : Screen() {
+     private val input = a.field(L("New task", "Nouvelle tâche"))
+     private val dueChips = a.hbox()
+     private var due: Long? = null
++    private var dueKey = "none"          // which reminder chip is selected: none | 1h | tonight | tomorrow | custom
+     private val onData = { render() }
+ 
+     init {
++        root.put(a.tabHeader(L("Tasks", "Tâches")))
+         val sv = a.vscroll {
+-            setPadding(a.dp(20), a.dp(18), a.dp(20), a.dp(120))
+-            put(a.text(L("Tasks", "Tâches"), 30f, Th.ink, true), MATCH, WRAP, 0f, 0, 0, 0, 14)
++            setPadding(a.dp(20), a.dp(6), a.dp(20), a.dp(120))
+             put(warn)
+             put(a.hbox {
+                 put(input, 0, WRAP, 1f)
+                 put(a.pill(L("Add", "Ajouter")) { add() }, WRAP, a.dp(48), 0f, 8, 0, 0, 0)
+             })
+-            val hs = a.hscroll {}
+-            hs.removeAllViews(); hs.addView(dueChips, FrameLayout.LayoutParams(WRAP, WRAP))
+-            put(hs, MATCH, WRAP, 0f, 0, 10, 0, 14)
++            put(a.chipScroller(dueChips, 0), MATCH, WRAP, 0f, 0, 10, 0, 14)
+             put(listBox)
+         }
+         input.setOnEditorActionListener { _, _, _ -> add(); true }
+@@ -65,16 +64,21 @@ class TasksScreen(private val a: MainActivity) : Screen() {
+ 
+     private fun plusHours(h: Int) = System.currentTimeMillis() + h * 3_600_000L
+     private fun at(hour: Int, addDays: Int): Long = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, addDays); set(Calendar.HOUR_OF_DAY, hour); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
++    private fun evening(): Long = at(20, 0).let { if (it <= System.currentTimeMillis() + 60_000) at(20, 1) else it }
+ 
++    /** The reminder chips. The chosen one now stays highlighted (before, only "No reminder" ever showed as selected). */
+     private fun drawDue() {
+         dueChips.removeAllViews()
+-        fun c(label: String, v: Long?, sel: Boolean) = dueChips.put(a.chip(label, sel, 0, { due = v; drawDue() }), WRAP, WRAP, 0f, 0, 0, 8, 0)
+-        c(L("No reminder", "Sans rappel"), null, due == null)
+-        val tonight = at(20, 0).let { if (it <= System.currentTimeMillis() + 60_000) at(20, 1) else it }
+-        c(L("In 1 hour", "Dans 1 h"), plusHours(1), false)
+-        c(L("Tonight 20:00", "Ce soir 20:00"), tonight, false)
+-        c(L("Tomorrow 09:00", "Demain 09:00"), at(9, 1), false)
+-        dueChips.put(a.chip(if (due != null) "⏰ " + fmtDate(due!!, true) else L("Pick date & time", "Choisir date et heure"), due != null, 0, { pick() }), WRAP, WRAP)
++        fun c(label: String, key: String, value: () -> Long?) {
++            dueChips.put(a.chip(label, dueKey == key, 0, { due = value(); dueKey = key; drawDue() }), WRAP, WRAP, 0f, 0, 0, 8, 0)
++        }
++        c(L("No reminder", "Sans rappel"), "none") { null }
++        c(L("In 1 hour", "Dans 1 h"), "1h") { plusHours(1) }
++        val today = at(20, 0) > System.currentTimeMillis() + 60_000
++        c(if (today) L("Tonight 20:00", "Ce soir 20:00") else L("Tomorrow 20:00", "Demain 20:00"), "tonight") { evening() }
++        c(L("Tomorrow 09:00", "Demain 09:00"), "tomorrow") { at(9, 1) }
++        val custom = dueKey == "custom" && due != null
++        dueChips.put(a.chip(if (custom) "⏰ " + fmtDate(due!!, true) else L("Pick date & time", "Choisir date et heure"), custom, 0, { pick() }), WRAP, WRAP)
+     }
+ 
+     private fun pick() {
+@@ -82,22 +86,39 @@ class TasksScreen(private val a: MainActivity) : Screen() {
+         DatePickerDialog(a, dialogTheme(), { _, y, m, d ->
+             TimePickerDialog(a, dialogTheme(), { _, h, mi ->
+                 val t = Calendar.getInstance().apply { set(y, m, d, h, mi, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
+-                if (t <= System.currentTimeMillis()) a.toast(L("Choose a time in the future.", "Choisissez une heure dans le futur.")) else { due = t; drawDue() }
++                if (t <= System.currentTimeMillis()) a.toast(L("Choose a time in the future.", "Choisissez une heure dans le futur.")) else { due = t; dueKey = "custom"; drawDue() }
+             }, c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.MINUTE), true).show()
+         }, c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)).show()
+     }
+ 
++    private fun hideKeyboard() {
++        (a.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager).hideSoftInputFromWindow(input.windowToken, 0)
++        input.clearFocus()
++    }
++
+     private fun add() {
+         val t = input.text.toString().trim()
+-        if (t.isEmpty()) return
+-        val k = Task(newId(), t.take(200), due, false)
++        if (t.isEmpty()) { a.toast(L("Type a task first.", "Écrivez d’abord une tâche.")); return }
+         val d = due
+-        Store.tasks.add(k); input.setText(""); due = null; drawDue()
+-        if (d != null) Reminders.ask(a) { ok ->
+-            if (ok) { k.armed = true; Reminders.schedule(a, k.id, d) } else k.armed = false
++        if (d != null && d <= System.currentTimeMillis()) {
++            a.toast(L("That time has already passed. Pick a later one.", "Cette heure est déjà passée. Choisissez-en une plus tardive."))
++            due = null; dueKey = "none"; drawDue(); return
++        }
++        val k = Task(newId(), t.take(200), d, false)
++        Store.tasks.add(k)
++        input.setText(""); due = null; dueKey = "none"; drawDue(); hideKeyboard()
++        Store.saveTasks(); render()
++        if (d == null) { a.toast(L("Task added.", "Tâche ajoutée.")); return }
++        Reminders.ask(a) { ok ->
++            if (ok) {
++                k.armed = true; Reminders.schedule(a, k.id, d)
++                a.toast(L("Task added. Reminder set for ", "Tâche ajoutée. Rappel prévu le ") + fmtDate(d, true))
++            } else {
++                k.armed = false
++                a.toast(L("Task added, but notifications are off so it will not ring.", "Tâche ajoutée, mais les notifications sont désactivées : aucune sonnerie."))
++            }
+             Store.saveTasks(); render()
+-        } else Store.saveTasks()
+-        render()
++        }
+     }
+ 
+     private fun toggle(k: Task) {
+@@ -114,7 +135,8 @@ class TasksScreen(private val a: MainActivity) : Screen() {
+         else if (hasDue && !Reminders.canExact(a)) warn.put(note(L("For on-time reminders, allow “Alarms & reminders”. Without it they may be a few minutes late.", "Pour des rappels à l’heure, autorisez « Alarmes et rappels ». Sinon ils peuvent avoir quelques minutes de retard."), L("Allow", "Autoriser")) { Reminders.openExactSettings(a) }, MATCH, WRAP, 0f, 0, 0, 0, 12)
+         listBox.removeAllViews()
+         val sorted = Store.tasks.sortedWith(compareBy<Task>({ it.done }, { it.due ?: Long.MAX_VALUE }))
+-        if (sorted.isEmpty()) listBox.put(a.text(L("No tasks yet.", "Aucune tâche."), 15f, Th.sub).apply { gravity = Gravity.CENTER }, MATCH, WRAP, 0f, 0, 40, 0, 0)
++        if (sorted.isEmpty()) listBox.put(a.text(L("No tasks yet.\nType one above, add a reminder if you like, then tap Add.", "Aucune tâche.\nÉcrivez-en une ci-dessus, ajoutez un rappel si vous voulez, puis touchez Ajouter."), 15f, Th.sub).apply { gravity = Gravity.CENTER; setLineSpacing(0f, 1.2f) }, MATCH, WRAP, 0f, 0, 40, 0, 0)
++        else listBox.put(a.text(L("${sorted.count { !it.done }} to do  •  ${sorted.count { it.done }} done", "${sorted.count { !it.done }} à faire  •  ${sorted.count { it.done }} terminée(s)"), 12f, Th.sub, true), MATCH, WRAP, 0f, 4, 0, 0, 8)
+         for (k in sorted) listBox.put(a.hbox {
+             background = a.rounded(Th.card, 18f, Th.line); setPadding(a.dp(6), a.dp(4), a.dp(6), a.dp(4)); minimumHeight = a.dp(60)
+             put(a.iconBtn(if (k.done) R.drawable.ic_check_circle else R.drawable.ic_circle, L("Done", "Terminé"), if (k.done) Th.accent else Th.sub, 24) { toggle(k) })
+@@ -205,16 +227,15 @@ class VaultScreen(private val a: MainActivity) : Screen() {
+ 
+     private fun unlocked(): View {
+         val list = entries!!
+-        return a.vscroll {
+-            setPadding(a.dp(20), a.dp(18), a.dp(20), a.dp(120))
+-            put(a.hbox {
+-                put(a.text(L("Vault", "Coffre"), 30f, Th.ink, true), 0, WRAP, 1f)
+-                put(a.iconBtn(R.drawable.ic_lock, L("Lock", "Verrouiller"), Th.ink) { lock() })
+-            }, MATCH, WRAP, 0f, 0, 0, 0, 14)
++        val col = a.vbox()
++        col.put(a.tabHeader(L("Vault", "Coffre"), a.iconBtn(R.drawable.ic_lock, L("Lock", "Verrouiller"), Th.ink) { lock() }))
++        col.put(a.vscroll {
++            setPadding(a.dp(20), a.dp(8), a.dp(20), a.dp(120))
+             put(a.pill(L("Add password", "Ajouter un mot de passe")) { edit(null) }, MATCH, WRAP, 0f, 0, 0, 0, 14)
+             if (list.isEmpty()) put(a.text(L("No passwords saved.", "Aucun mot de passe enregistré."), 15f, Th.sub).apply { gravity = Gravity.CENTER }, MATCH, WRAP, 0f, 0, 30, 0, 0)
+             for (e in list) put(a.hbox {
+-                background = a.rounded(Th.card, 18f, Th.line); setPadding(a.dp(16), a.dp(12), a.dp(6), a.dp(12))
++                background = a.pressable(Th.card, 18f, Th.line); setPadding(a.dp(16), a.dp(12), a.dp(6), a.dp(12))
++                isClickable = true; setOnClickListener { edit(e) }   // tap the card to edit
+                 put(a.vbox {
+                     put(a.text(e.site.ifBlank { "—" }, 16f, Th.ink, true))
+                     if (e.user.isNotBlank()) put(a.text(e.user, 13f, Th.sub), MATCH, WRAP, 0f, 0, 3, 0, 0)
+@@ -222,12 +243,12 @@ class VaultScreen(private val a: MainActivity) : Screen() {
+                 }, 0, WRAP, 1f)
+                 put(a.iconBtn(if (e.id in revealed) R.drawable.ic_eye_off else R.drawable.ic_eye, L("Show", "Afficher"), Th.sub, 20) { if (!revealed.add(e.id)) revealed.remove(e.id); render() })
+                 put(a.iconBtn(R.drawable.ic_doc, L("Copy", "Copier"), Th.sub, 20) { copy(e.pass) })
+-                put(a.iconBtn(R.drawable.ic_pen, L("Edit", "Modifier"), Th.sub, 20) { edit(e) })
+                 put(a.iconBtn(R.drawable.ic_delete, L("Delete", "Supprimer"), Th.danger, 20) {
+                     a.confirm(L("Delete this password?", "Supprimer ce mot de passe ?"), e.site, L("Delete", "Supprimer")) { list.remove(e); Vault.save(a, list); render() }
+                 })
+             }, MATCH, WRAP, 0f, 0, 0, 0, 8)
+-        }
++        }, MATCH, 0, 1f)
++        return col
+     }
+ 
+     private fun edit(e: VaultEntry?) {
+@@ -264,10 +285,7 @@ class TransferScreen(private val a: MainActivity, pre: String? = null) : Screen(
+     private var busy = false
+ 
+     init {
+-        val top = a.hbox { setPadding(a.dp(8), a.dp(8), a.dp(16), 0) }
+-        top.put(a.iconBtn(R.drawable.ic_back, L("Back", "Retour"), Th.ink, 24) { a.pop() })
+-        top.put(a.text(L("Wi-Fi transfer", "Transfert Wi-Fi"), 22f, Th.ink, true), 0, WRAP, 1f)
+-        root.put(top)
++        root.put(a.pageHeader({ a.pop() }, a.text(L("Wi-Fi transfer", "Transfert Wi-Fi"), 22f, Th.ink, true)))
+         val sv = a.vscroll {
+             setPadding(a.dp(20), a.dp(14), a.dp(20), a.dp(40))
+             // desktop sync
+diff --git a/app/src/main/java/com/notia/mobile/ui/Tabs.kt b/app/src/main/java/com/notia/mobile/ui/Tabs.kt
+index fac1bfe..297351b 100644
+--- a/app/src/main/java/com/notia/mobile/ui/Tabs.kt
++++ b/app/src/main/java/com/notia/mobile/ui/Tabs.kt
+@@ -1,6 +1,9 @@
+ package com.notia.mobile.ui
+ 
++import android.content.Intent
+ import android.graphics.Rect
++import android.net.Uri
++import android.os.Build
+ import android.view.Gravity
+ import android.view.View
+ import android.view.ViewGroup
+@@ -13,11 +16,13 @@ import android.widget.Switch
+ import android.widget.TextView
+ import android.content.res.ColorStateList
+ import android.graphics.drawable.GradientDrawable
++import com.notia.mobile.BuildConfig
+ import com.notia.mobile.MainActivity
+ import com.notia.mobile.R
+ import com.notia.mobile.core.Note
+ import com.notia.mobile.core.Store
+ import com.notia.mobile.core.fmtDate
++import com.notia.mobile.sys.Reminders
+ 
+ /** Hosts the five main screens and the floating pill navigation. */
+ class Tabs(private val a: MainActivity, start: Int) : Screen() {
+@@ -87,46 +92,55 @@ class NotesScreen(private val a: MainActivity) : Screen() {
+     private var shown: List<Note> = emptyList()
+     private val onData = { refresh() }
+ 
++    /** Views of one note card, built once and re-filled while scrolling (the old adapter rebuilt every card on every scroll). */
++    private class Holder(val root: FrameLayout, val card: LinearLayout, val strip: View, val title: TextView, val body: TextView, val date: TextView)
++
+     private val adapter = object : BaseAdapter() {
+         override fun getCount() = shown.size
+         override fun getItem(p: Int) = shown[p]
+         override fun getItemId(p: Int) = p.toLong()
+         override fun getView(p: Int, cv: View?, parent: ViewGroup): View {
++            val h = (cv?.tag as? Holder) ?: build()
+             val n = shown[p]
+-            val color = Store.cats.firstOrNull { it.id == n.cat }?.color?.let { android.graphics.Color.parseColor(it) } ?: Th.line
++            h.strip.setBackgroundColor(Store.cats.firstOrNull { it.id == n.cat }?.color?.let { android.graphics.Color.parseColor(it) } ?: Th.line)
++            h.title.text = n.title.ifBlank { L("Untitled", "Sans titre") }
++            h.body.text = n.text.take(200); h.body.visibility = if (n.text.isEmpty()) View.GONE else View.VISIBLE
++            h.date.text = fmtDate(n.modified, true)
++            h.card.setOnClickListener { a.push(EditorScreen(a, n.id)) }
++            h.card.setOnLongClickListener { a.confirm(L("Delete this note?", "Supprimer cette note ?"), null, L("Delete", "Supprimer")) { Store.removeNote(n.id); Store.changed() }; true }
++            return h.root
++        }
++
++        private fun build(): Holder {
++            val strip = View(a)
++            val title = a.text("", 17f, Th.ink, true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
++            val body = a.text("", 14f, Th.sub).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END; setLineSpacing(0f, 1.15f) }
++            val date = a.text("", 11f, Th.sub)
+             val card = a.hbox {
+                 background = a.pressable(Th.card, 20f, Th.line); clipRound(20f)
+-                put(View(a).apply { setBackgroundColor(color) }, a.dp(5), MATCH)
++                put(strip, a.dp(5), MATCH)
+                 put(a.vbox {
+                     setPadding(a.dp(16), a.dp(14), a.dp(16), a.dp(14))
+-                    put(a.text(n.title.ifBlank { L("Untitled", "Sans titre") }, 17f, Th.ink, true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
+-                    if (n.text.isNotEmpty()) put(a.text(n.text.take(200), 14f, Th.sub).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END; setLineSpacing(0f, 1.15f) }, MATCH, WRAP, 0f, 0, 6, 0, 0)
+-                    put(a.text(fmtDate(n.modified, true), 11f, Th.sub), MATCH, WRAP, 0f, 0, 8, 0, 0)
++                    put(title); put(body, MATCH, WRAP, 0f, 0, 6, 0, 0); put(date, MATCH, WRAP, 0f, 0, 8, 0, 0)
+                 }, 0, WRAP, 1f)
+                 isClickable = true
+-                setOnClickListener { a.push(EditorScreen(a, n.id)) }
+-                setOnLongClickListener { a.confirm(L("Delete this note?", "Supprimer cette note ?"), null, L("Delete", "Supprimer")) { Store.removeNote(n.id); Store.changed() }; true }
+             }
+-            return FrameLayout(a).apply { setPadding(0, a.dp(5), 0, a.dp(5)); addView(card, FrameLayout.LayoutParams(MATCH, WRAP)) }
++            val root = FrameLayout(a).apply { setPadding(0, a.dp(5), 0, a.dp(5)); addView(card, FrameLayout.LayoutParams(MATCH, WRAP)) }
++            return Holder(root, card, strip, title, body, date).also { root.tag = it }
+         }
+     }
+ 
+     init {
+         root.setBackgroundColor(Th.bg)
+-        val head = a.hbox { setPadding(a.dp(20), a.dp(18), a.dp(8), 0) }
+-        head.put(a.text(L("Notes", "Notes"), 30f, Th.ink, true), 0, WRAP, 1f)
+-        head.put(a.iconBtn(R.drawable.ic_swap, L("Transfer", "Transfert"), Th.ink) { a.push(TransferScreen(a)) })
+-        root.put(head)
++        root.put(a.tabHeader(L("Notes", "Notes"), a.iconBtn(R.drawable.ic_swap, L("Transfer", "Transfert"), Th.ink) { a.push(TransferScreen(a)) }))
+         val search = a.field(L("Search", "Rechercher"))
+         search.addTextChangedListener(object : android.text.TextWatcher {
+             override fun afterTextChanged(s: android.text.Editable?) { query = s?.toString() ?: ""; refresh() }
+             override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, af: Int) {}
+             override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+         })
+-        root.put(search, MATCH, WRAP, 0f, 20, 12, 20, 0)
+-        val hs = a.hscroll { setPadding(a.dp(20), 0, a.dp(20), 0) }
+-        (hs.getChildAt(0) as LinearLayout).let { row -> chips.let { c -> hs.removeAllViews(); hs.addView(c, FrameLayout.LayoutParams(WRAP, WRAP)); } }
+-        root.put(hs, MATCH, WRAP, 0f, 0, 12, 0, 6)
++        root.put(search, MATCH, WRAP, 0f, 20, 8, 20, 0)
++        root.put(a.chipScroller(chips), MATCH, WRAP, 0f, 0, 12, 0, 6)
+         list.divider = null; list.dividerHeight = 0; list.clipToPadding = false
+         list.setPadding(a.dp(20), a.dp(4), a.dp(20), a.dp(170)); list.selector = android.graphics.drawable.ColorDrawable(0)
+         list.adapter = adapter
+@@ -171,45 +185,199 @@ class NotesScreen(private val a: MainActivity) : Screen() {
+ 
+ class SettingsScreen(private val a: MainActivity) : Screen() {
+     private val root = a.vbox { setBackgroundColor(Th.bg) }
++    private val notifBox = a.vbox()
++    private val dialogTheme get() = if (Store.dark) android.R.style.Theme_DeviceDefault_Dialog_Alert else android.R.style.Theme_DeviceDefault_Light_Dialog_Alert
++
++    companion object {
++        const val SITE = "notia.srichard.site"
++        const val EMAIL = "rsongrichard@gmail.com"
++    }
+ 
+     init {
++        root.put(a.tabHeader(L("Settings", "Réglages")))
+         val sv = a.vscroll {
+-            setPadding(a.dp(20), a.dp(18), a.dp(20), a.dp(120))
+-            put(a.text(L("Settings", "Réglages"), 30f, Th.ink, true), MATCH, WRAP, 0f, 0, 0, 0, 18)
+-            put(card(L("Dark mode", "Mode sombre"), null, Switch(a).apply {
+-                isChecked = Store.dark
+-                thumbTintList = ColorStateList.valueOf(0xFFFFFFFF.toInt()); trackTintList = ColorStateList.valueOf(Th.accent)
+-                setOnCheckedChangeListener { _, c -> Store.dark = c; Store.saveState(); Store.flush(); a.start(4) }
+-            }), MATCH, WRAP, 0f, 0, 0, 0, 10)
+-            put(a.vbox {
+-                background = a.rounded(Th.card, 20f, Th.line); setPadding(a.dp(16), a.dp(14), a.dp(16), a.dp(14))
+-                put(a.text(L("Language", "Langue"), 16f, Th.ink, true), MATCH, WRAP, 0f, 0, 0, 0, 10)
+-                put(a.hbox {
+-                    put(a.chip("English", Store.lang == "en", 0, { setLang("en") }), WRAP, WRAP, 0f, 0, 0, 8, 0)
+-                    put(a.chip("Français", Store.lang == "fr", 0, { setLang("fr") }))
++            setPadding(a.dp(20), a.dp(6), a.dp(20), a.dp(120))
++
++            put(cap(L("Appearance", "Apparence")), MATCH, WRAP, 0f, 4, 6, 0, 8)
++            put(group {
++                put(row(R.drawable.ic_eye, L("Dark mode", "Mode sombre"), null, sw(Store.dark) { c -> Store.dark = c; Store.saveState(); Store.flush(); a.start(4) }, null))
++                put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
++                put(a.vbox {
++                    setPadding(a.dp(16), a.dp(12), a.dp(16), a.dp(14))
++                    put(a.text(L("Language", "Langue"), 16f, Th.ink, true), MATCH, WRAP, 0f, 0, 0, 0, 10)
++                    put(a.hbox {
++                        put(a.chip("English", Store.lang == "en", 0, { setLang("en") }), WRAP, WRAP, 0f, 0, 0, 8, 0)
++                        put(a.chip("Français", Store.lang == "fr", 0, { setLang("fr") }))
++                    })
+                 })
+-            }, MATCH, WRAP, 0f, 0, 0, 0, 10)
+-            put(a.vbox {
+-                background = a.rounded(Th.card, 20f, Th.line); setPadding(a.dp(16), a.dp(16), a.dp(16), a.dp(16))
+-                put(a.text("Notia", 20f, Th.ink, true))
+-                put(a.text(L("Version ", "Version ") + com.notia.mobile.BuildConfig.VERSION_NAME, 13f, Th.sub), MATCH, WRAP, 0f, 0, 4, 0, 10)
+-                put(a.text(L("Your notes, tasks and books stay on this phone. No account, no tracking, no ads. Works fully offline.", "Vos notes, tâches et livres restent sur ce téléphone. Aucun compte, aucun suivi, aucune publicité. Fonctionne entièrement hors ligne."), 14f, Th.sub).apply { setLineSpacing(0f, 1.2f) })
+-                put(a.text(L("Made by Song Richard", "Créé par Song Richard"), 14f, Th.accent, true).apply {
+-                    isClickable = true
+-                    setOnClickListener { try { a.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://srichard.site"))) } catch (e: Exception) {} }
+-                }, WRAP, WRAP, 0f, 0, 12, 0, 0)
+-            }, MATCH, WRAP)
++            }, MATCH, WRAP, 0f, 0, 0, 0, 18)
++
++            put(cap(L("Reminders", "Rappels")), MATCH, WRAP, 0f, 4, 0, 0, 8)
++            put(notifBox, MATCH, WRAP, 0f, 0, 0, 0, 18)
++
++            put(cap(L("About", "À propos")), MATCH, WRAP, 0f, 4, 0, 0, 8)
++            put(aboutCard(), MATCH, WRAP, 0f, 0, 0, 0, 10)
++            put(group {
++                put(row(R.drawable.ic_doc, L("About Notia", "À propos de Notia"), L("What Notia does", "Ce que fait Notia"), chevron()) { aboutSheet() })
++                put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
++                put(row(R.drawable.ic_lock, L("Privacy policy", "Politique de confidentialité"), L("Your data stays on this phone", "Vos données restent sur ce téléphone"), chevron()) { privacySheet() })
++                put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
++                put(row(R.drawable.ic_link, L("Website", "Site web"), SITE, chevron()) { openUrl("https://$SITE") })
++                put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
++                put(row(R.drawable.ic_chat, L("Contact the developer", "Contacter le développeur"), EMAIL, chevron()) { mail() })
++                put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
++                put(row(R.drawable.ic_pen, L("Developer", "Développeur"), "Song Richard", chevron()) { openUrl("https://srichard.site") })
++            }, MATCH, WRAP, 0f, 0, 0, 0, 16)
++            put(a.text(L("Made with care by Song Richard\n© 2026 Notia. All rights reserved.", "Fait avec soin par Song Richard\n© 2026 Notia. Tous droits réservés."), 12f, Th.sub).apply { gravity = Gravity.CENTER; setLineSpacing(0f, 1.25f) }, MATCH, WRAP, 0f, 0, 4, 0, 0)
+         }
+         root.put(sv, MATCH, 0, 1f)
++        drawNotifs()
++    }
++
++    // ---------- building blocks ----------
++    private fun cap(t: String): View = a.text(t.uppercase(), 12f, Th.sub, true).apply { letterSpacing = 0.08f }
++
++    private fun group(build: LinearLayout.() -> Unit): LinearLayout = a.vbox { background = a.rounded(Th.card, 20f, Th.line); clipRound(20f); build() }
++
++    private fun divider(): View = View(a).apply { setBackgroundColor(Th.line) }
++
++    private fun chevron(): View = a.text("›", 24f, Th.sub)
++
++    private fun sw(on: Boolean, change: (Boolean) -> Unit): Switch = Switch(a).apply {
++        isChecked = on
++        val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
++        thumbTintList = ColorStateList(states, intArrayOf(0xFFFFFFFF.toInt(), 0xFFB8B4CC.toInt()))
++        trackTintList = ColorStateList(states, intArrayOf(Th.accent, Th.line))
++        setOnCheckedChangeListener { _, c -> change(c) }
++    }
++
++    /** One settings row: accent icon, title + optional sub-line, optional trailing control, optional tap action. */
++    private fun row(res: Int, title: String, sub: String?, trailing: View?, onClick: (() -> Unit)?): View = a.hbox {
++        minimumHeight = a.dp(60); setPadding(a.dp(16), a.dp(10), a.dp(14), a.dp(10))
++        if (onClick != null) { background = a.pressable(android.graphics.Color.TRANSPARENT, 0f); isClickable = true; setOnClickListener { onClick() } }
++        put(a.icon(res, Th.accent, 22), a.dp(22), a.dp(22), 0f, 0, 0, 14, 0)
++        put(a.vbox {
++            put(a.text(title, 16f, Th.ink, true))
++            if (sub != null) put(a.text(sub, 12.5f, Th.sub).apply { setLineSpacing(0f, 1.1f) }, MATCH, WRAP, 0f, 0, 3, 0, 0)
++        }, 0, WRAP, 1f)
++        if (trailing != null) put(trailing, WRAP, WRAP, 0f, 10, 0, 0, 0)
++    }
++
++    private fun hhmm(h: Int, m: Int) = String.format("%02d:%02d", h, m)
++
++    // ---------- reminders ----------
++    private fun drawNotifs() {
++        notifBox.removeAllViews()
++        if (!Reminders.enabled(a)) {
++            notifBox.put(a.vbox {
++                background = a.rounded(Th.field, 16f); setPadding(a.dp(14), a.dp(12), a.dp(14), a.dp(12))
++                put(a.text(L("Notifications are turned off for Notia, so no reminder can reach you.", "Les notifications sont désactivées pour Notia : aucun rappel ne pourra vous parvenir."), 13f, Th.ink).apply { setLineSpacing(0f, 1.15f) })
++                put(a.text(L("Open settings", "Ouvrir les réglages"), 14f, Th.accent, true).apply {
++                    setPadding(0, a.dp(8), 0, a.dp(4)); isClickable = true
++                    setOnClickListener { if (Build.VERSION.SDK_INT >= 33 && !Reminders.hasPermission(a)) Reminders.ask(a) { drawNotifs() } else Reminders.openNotificationSettings(a) }
++                }, WRAP, WRAP)
++            }, MATCH, WRAP, 0f, 0, 0, 0, 10)
++        }
++        notifBox.put(group {
++            put(row(R.drawable.ic_pen, L("Morning writing reminder", "Rappel d’écriture du matin"),
++                if (Store.remMorning) L("Every day at ${hhmm(Store.morningHour, Store.morningMin)}: write a note or an idea", "Chaque jour à ${hhmm(Store.morningHour, Store.morningMin)} : écrivez une note ou une idée") else L("Off", "Désactivé"),
++                sw(Store.remMorning) { c -> Store.remMorning = c; Store.saveState(); Reminders.scheduleMorning(a); if (c) Reminders.ask(a) { drawNotifs() } else drawNotifs() }, null))
++            if (Store.remMorning) {
++                put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
++                put(row(R.drawable.ic_clock, L("Reminder time", "Heure du rappel"), null, a.text(hhmm(Store.morningHour, Store.morningMin), 16f, Th.accent, true)) { pickTime() })
++            }
++            put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
++            put(row(R.drawable.ic_wifi, L("Come-back reminder", "Rappel de retour"), L("A gentle nudge after 3, 7, 14 and 30 days without opening Notia", "Un petit rappel après 3, 7, 14 et 30 jours sans ouvrir Notia"),
++                sw(Store.remInactive) { c -> Store.remInactive = c; Store.saveState(); Reminders.scheduleIdle(a); if (c) Reminders.ask(a) { drawNotifs() } else drawNotifs() }, null))
++            put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
++            put(row(R.drawable.ic_book, L("Finish your book", "Terminez votre livre"), L("Evening reminder (19:00) for the book you are reading", "Rappel le soir (19:00) pour le livre en cours"),
++                sw(Store.remBooks) { c -> Store.remBooks = c; Store.saveState(); Reminders.scheduleReading(a); if (c) Reminders.ask(a) { drawNotifs() } else drawNotifs() }, null))
++            put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
++            put(row(R.drawable.ic_check_circle, L("Send a test notification", "Envoyer une notification test"), null, chevron()) { testNotif() })
++        })
++    }
++
++    private fun pickTime() {
++        android.app.TimePickerDialog(a, dialogTheme, { _, h, m ->
++            Store.morningHour = h; Store.morningMin = m; Store.saveState(); Reminders.scheduleMorning(a); drawNotifs()
++        }, Store.morningHour, Store.morningMin, true).show()
+     }
+ 
+-    private fun setLang(l: String) { if (Store.lang == l) return; Store.lang = l; Store.saveState(); Store.flush(); com.notia.mobile.sys.Reminders.channels(a); a.start(4) }
++    private fun testNotif() {
++        Reminders.ask(a) { ok ->
++            if (!ok) { a.toast(L("Allow notifications for Notia first.", "Autorisez d’abord les notifications pour Notia.")); drawNotifs(); return@ask }
++            Reminders.show(a, Reminders.CH_NOTE, 7100, "Notia", L("This is how your reminders will look. Tap to write a note.", "Voici l’aspect de vos rappels. Touchez pour écrire une note."), true)
++        }
++    }
+ 
+-    private fun card(title: String, sub: String?, trailing: View): View = a.hbox {
+-        background = a.rounded(Th.card, 20f, Th.line); setPadding(a.dp(16), a.dp(14), a.dp(16), a.dp(14))
+-        put(a.text(title, 16f, Th.ink, true), 0, WRAP, 1f)
+-        put(trailing, WRAP, WRAP)
++    // ---------- about ----------
++    private fun aboutCard(): View = a.hbox {
++        background = a.rounded(Th.card, 20f, Th.line); setPadding(a.dp(16), a.dp(16), a.dp(16), a.dp(16))
++        put(android.widget.ImageView(a).apply { setImageResource(R.drawable.logo); scaleType = android.widget.ImageView.ScaleType.FIT_CENTER; clipRound(14f) }, a.dp(56), a.dp(56), 0f, 0, 0, 14, 0)
++        put(a.vbox {
++            put(a.text("Notia", 20f, Th.ink, true))
++            put(a.text(L("Version ", "Version ") + BuildConfig.VERSION_NAME + "  (build " + BuildConfig.VERSION_CODE + ")", 13f, Th.sub), MATCH, WRAP, 0f, 0, 4, 0, 0)
++            put(a.text(L("Notes, tasks, books and a vault. Private and offline.", "Notes, tâches, livres et coffre. Privé et hors ligne."), 12.5f, Th.sub).apply { setLineSpacing(0f, 1.15f) }, MATCH, WRAP, 0f, 0, 6, 0, 0)
++        }, 0, WRAP, 1f)
+     }
+ 
++    private fun docSheet(title: String, parts: List<Pair<String?, String>>) {
++        val s = Sheet(a, title)
++        for ((h, body) in parts) {
++            if (h != null) s.body.put(a.text(h, 15f, Th.accent, true), MATCH, WRAP, 0f, 0, 10, 0, 4)
++            s.body.put(a.text(body, 14f, Th.ink).apply { setLineSpacing(0f, 1.25f) }, MATCH, WRAP, 0f, 0, 0, 0, 4)
++        }
++        s.body.put(a.pill(L("Close", "Fermer"), false) { s.dismiss() }, MATCH, WRAP, 0f, 0, 16, 0, 0)
++        s.show()
++    }
++
++    private fun aboutSheet() = docSheet(L("About Notia", "À propos de Notia"), listOf(
++        null to L("Notia is a calm, private place for everything you want to remember: notes, tasks, books and passwords. Everything works offline and stays on your phone.",
++            "Notia est un endroit calme et privé pour tout ce que vous voulez retenir : notes, tâches, livres et mots de passe. Tout fonctionne hors ligne et reste sur votre téléphone."),
++        L("Notes", "Notes") to L("A rich editor with headings, lists, colours, highlights, images, links, tables, formulas and charts. Organise with categories, search, and export or share as PDF, Word or text.",
++            "Un éditeur riche : titres, listes, couleurs, surlignages, images, liens, tableaux, formules et graphiques. Catégories, recherche, export et partage en PDF, Word ou texte."),
++        L("Tasks", "Tâches") to L("Add a task with a date and time and Notia rings like an alarm, with Done and Snooze buttons.",
++            "Ajoutez une tâche avec date et heure : Notia sonne comme une alarme, avec les boutons Terminé et Reporter."),
++        L("Library", "Bibliothèque") to L("Read PDF, EPUB, MOBI, DOCX, TXT and HTML books with progress, reading time, bookmarks, highlights and a table of contents.",
++            "Lisez vos livres PDF, EPUB, MOBI, DOCX, TXT et HTML avec progression, temps de lecture, marque-pages, surlignages et sommaire."),
++        L("Vault", "Coffre") to L("Store passwords encrypted with a PIN or password that only you know.",
++            "Gardez vos mots de passe chiffrés par un code ou un mot de passe que vous seul connaissez."),
++        L("Wi-Fi transfer", "Transfert Wi-Fi") to L("Send notes between your devices on the same Wi-Fi, or sync from Notia Desktop with a QR code.",
++            "Envoyez des notes entre vos appareils sur le même Wi-Fi, ou synchronisez depuis Notia Desktop avec un QR code."),
++        L("Made by", "Créé par") to "Song Richard\n$SITE\n$EMAIL",
++    ))
++
++    private fun privacySheet() = docSheet(L("Privacy policy", "Politique de confidentialité"), listOf(
++        null to L("Last updated: November 2026", "Dernière mise à jour : novembre 2026"),
++        L("In short", "En bref") to L("Notia has no account, no analytics, no tracking and no ads. We do not collect your data and we cannot see it. Your notes, tasks, books and passwords stay on your phone.",
++            "Notia n’a ni compte, ni statistiques, ni suivi, ni publicité. Nous ne collectons pas vos données et ne pouvons pas les voir. Vos notes, tâches, livres et mots de passe restent sur votre téléphone."),
++        L("What is stored on your phone", "Ce qui est stocké sur votre téléphone") to L("Notes (text, images, tables), categories, tasks and their reminder times, the books you add with covers, reading progress, bookmarks and highlights, your settings, and your vault entries. All of it lives in Notia's private storage, which other apps cannot read. Notia disables Android cloud backup, so uninstalling the app permanently deletes this data.",
++            "Notes (texte, images, tableaux), catégories, tâches et heures de rappel, livres ajoutés avec couvertures, progression de lecture, marque-pages et surlignages, réglages et entrées du coffre. Tout se trouve dans le stockage privé de Notia, inaccessible aux autres applications. Notia désactive la sauvegarde cloud d’Android : désinstaller l’application supprime définitivement ces données."),
++        L("Vault", "Coffre") to L("Vault entries are encrypted with AES-256-GCM using a key held in the Android Keystore and protected by your PIN or password. If you forget it, the vault cannot be recovered. It can only be reset, which deletes its content.",
++            "Les entrées du coffre sont chiffrées en AES-256-GCM avec une clé conservée dans l’Android Keystore et protégée par votre code ou mot de passe. En cas d’oubli, le coffre est irrécupérable : on ne peut que le réinitialiser, ce qui supprime son contenu."),
++        L("Network use", "Utilisation du réseau") to L("Notia connects to a network only when you start a Wi-Fi transfer or a desktop sync, and only to devices on your local network. Transfers use a short code and are not encrypted, so use trusted Wi-Fi. Links you tap open in your browser. Scanning a QR code uses Google Play services' code scanner, which processes the camera image on your device; Notia only receives the text of the code and does not request the camera permission.",
++            "Notia se connecte à un réseau uniquement lorsque vous lancez un transfert Wi-Fi ou une synchronisation avec le bureau, et seulement vers des appareils de votre réseau local. Les transferts utilisent un court code et ne sont pas chiffrés : utilisez un Wi-Fi de confiance. Les liens touchés s’ouvrent dans votre navigateur. Le scan de QR code utilise le lecteur des services Google Play, qui traite l’image sur votre appareil ; Notia ne reçoit que le texte du code et ne demande pas l’autorisation de la caméra."),
++        L("Permissions", "Autorisations") to L("Notifications and alarms: to ring your task reminders and send the reminders you enable in Settings. Start at boot: to restore reminders after a restart. Internet: for Wi-Fi transfer only. Reminders are created on your phone; no server is involved.",
++            "Notifications et alarmes : pour faire sonner vos rappels de tâches et envoyer ceux que vous activez dans les réglages. Démarrage : pour restaurer les rappels après un redémarrage. Internet : uniquement pour le transfert Wi-Fi. Les rappels sont créés sur votre téléphone, sans aucun serveur."),
++        L("Sharing and export", "Partage et export") to L("When you share or export a note, the file goes to the app you choose. What that app does with it is covered by its own policy.",
++            "Lorsque vous partagez ou exportez une note, le fichier est transmis à l’application que vous choisissez. Son traitement dépend de la politique de cette application."),
++        L("Your control", "Votre contrôle") to L("You can delete any note, task, book or password inside the app, reset the vault, and turn every reminder off in Settings.",
++            "Vous pouvez supprimer toute note, tâche, livre ou mot de passe dans l’application, réinitialiser le coffre et désactiver chaque rappel dans les réglages."),
++        L("Changes and contact", "Modifications et contact") to L("If this policy changes, the new version will appear here. Questions: $EMAIL or $SITE.",
++            "Si cette politique change, la nouvelle version apparaîtra ici. Questions : $EMAIL ou $SITE."),
++    ))
++
++    private fun openUrl(u: String) { try { a.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(u))) } catch (e: Exception) { a.toast(L("No app can open this link.", "Aucune application ne peut ouvrir ce lien.")) } }
++
++    private fun mail() {
++        val i = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:")).putExtra(Intent.EXTRA_EMAIL, arrayOf(EMAIL))
++            .putExtra(Intent.EXTRA_SUBJECT, "Notia ${BuildConfig.VERSION_NAME}")
++            .putExtra(Intent.EXTRA_TEXT, "\n\n—\nNotia ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}), Android ${Build.VERSION.RELEASE}, ${Build.MANUFACTURER} ${Build.MODEL}")
++        try { a.startActivity(i) } catch (e: Exception) { a.toast(L("No email app found. Write to $EMAIL", "Aucune application e-mail. Écrivez à $EMAIL")) }
++    }
++
++    private fun setLang(l: String) { if (Store.lang == l) return; Store.lang = l; Store.saveState(); Store.flush(); Reminders.channels(a); a.start(4) }
++
+     override fun view(): View = root
++    override fun onShow() { drawNotifs() }
+ }
+diff --git a/app/src/main/java/com/notia/mobile/ui/Ui.kt b/app/src/main/java/com/notia/mobile/ui/Ui.kt
+index cb3afcb..bfd24ae 100644
+--- a/app/src/main/java/com/notia/mobile/ui/Ui.kt
++++ b/app/src/main/java/com/notia/mobile/ui/Ui.kt
+@@ -41,6 +41,8 @@ fun L(en: String, fr: String) = if (Store.lang == "fr") fr else en
+ 
+ const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+ const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
++/** "Use the size the view already declares" (icon buttons are 44dp squares), else MATCH width / WRAP height. */
++const val AUTO = -3
+ 
+ fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
+ fun Context.dpf(v: Float): Float = v * resources.displayMetrics.density
+@@ -49,8 +51,13 @@ fun View.dp(v: Int) = context.dp(v)
+ fun Context.vbox(f: LinearLayout.() -> Unit = {}) = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; f() }
+ fun Context.hbox(f: LinearLayout.() -> Unit = {}) = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; f() }
+ 
+-fun LinearLayout.put(v: View, w: Int = MATCH, h: Int = WRAP, weight: Float = 0f, l: Int = 0, t: Int = 0, r: Int = 0, b: Int = 0): View {
+-    addView(v, LinearLayout.LayoutParams(w, h, weight).also { it.setMargins(dp(l), dp(t), dp(r), dp(b)) }); return v
++fun LinearLayout.put(v: View, w: Int = AUTO, h: Int = AUTO, weight: Float = 0f, l: Int = 0, t: Int = 0, r: Int = 0, b: Int = 0): View {
++    // Before: the default was always MATCH x WRAP, which silently stretched every 44dp icon button to the full
++    // row width (buttons drifted to the middle of the screen, titles collapsed to 0 width, task rows looked empty).
++    val own = v.layoutParams
++    val ww = if (w == AUTO) (own?.width ?: MATCH) else w
++    val hh = if (h == AUTO) (own?.height ?: WRAP) else h
++    addView(v, LinearLayout.LayoutParams(ww, hh, weight).also { it.setMargins(dp(l), dp(t), dp(r), dp(b)) }); return v
+ }
+ fun FrameLayout.put(v: View, w: Int = MATCH, h: Int = MATCH, gravity: Int = Gravity.TOP or Gravity.START, l: Int = 0, t: Int = 0, r: Int = 0, b: Int = 0): View {
+     addView(v, FrameLayout.LayoutParams(w, h, gravity).also { it.setMargins(dp(l), dp(t), dp(r), dp(b)) }); return v
+@@ -90,6 +97,37 @@ fun Context.iconBtn(res: Int, desc: String, color: Int = Th.ink, size: Int = 22,
+     isClickable = true; setOnClickListener { onClick() }
+ }
+ 
++/** One consistent screen header: 56dp tall, title vertically centred, round 44dp actions on the right. */
++fun Context.tabHeader(title: CharSequence, vararg actions: View): LinearLayout = hbox {
++    minimumHeight = dp(56); setPadding(dp(20), dp(6), dp(10), 0)
++    put(text(title, 30f, Th.ink, true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }, 0, WRAP, 1f)
++    for (a in actions) put(a)
++}
++
++/** Header for pushed screens (editor, reader, transfer): back button, flexible middle, actions. */
++fun Context.pageHeader(onBack: () -> Unit, middle: View?, vararg actions: View): LinearLayout = hbox {
++    minimumHeight = dp(56); setPadding(dp(6), dp(6), dp(6), 0)
++    put(iconBtn(com.notia.mobile.R.drawable.ic_back, L("Back", "Retour"), Th.ink, 24) { onBack() })
++    if (middle != null) put(middle, 0, WRAP, 1f, 4, 0, 4, 0) else put(View(context), 0, 1, 1f)
++    for (a in actions) put(a)
++}
++
++/**
++ * Frosted-glass surface. Plain Views cannot blur what is behind them on every Android version, so the effect is built
++ * from a translucent tint, a soft top sheen and a hairline highlight border; it reads as glass over text and covers.
++ */
++fun Context.glass(r: Float): android.graphics.drawable.Drawable {
++    val dark = Store.dark
++    val base = GradientDrawable().apply { cornerRadius = dpf(r); setColor(if (dark) 0x992A2640.toInt() else 0xA6FFFFFF.toInt()) }
++    val sheen = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
++        intArrayOf(if (dark) 0x38FFFFFF else 0x99FFFFFF.toInt(), 0x00FFFFFF)).apply { cornerRadius = dpf(r) }
++    val edge = GradientDrawable().apply {
++        cornerRadius = dpf(r); setColor(Color.TRANSPARENT)
++        setStroke(Math.max(1, dpf(1f).toInt()), if (dark) 0x40FFFFFF else 0x30000000)
++    }
++    return android.graphics.drawable.LayerDrawable(arrayOf(base, sheen, edge))
++}
++
+ fun Context.pill(label: String, filled: Boolean = true, danger: Boolean = false, onClick: () -> Unit): TextView = text(label, 15f, if (filled) Th.accentInk else Th.ink, true).apply {
+     gravity = Gravity.CENTER
+     val c = if (danger) Th.danger else Th.accent
+@@ -100,8 +138,8 @@ fun Context.pill(label: String, filled: Boolean = true, danger: Boolean = false,
+ 
+ fun Context.chip(label: String, selected: Boolean, dot: Int = 0, onClick: () -> Unit, onLong: (() -> Unit)? = null): LinearLayout = hbox {
+     background = pressable(if (selected) Th.accent else Th.card, 17f, if (selected) 0 else Th.line)
+-    setPadding(dp(14), 0, dp(14), 0); minimumHeight = dp(34)
+-    if (dot != 0) put(View(context).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(dot) } }, dp(8), dp(8), 0f, 0, 0, 6, 0)
++    setPadding(dp(14), 0, dp(14), 0); minimumHeight = dp(36); gravity = Gravity.CENTER
++    if (dot != 0) put(View(context).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(dot); if (selected) setStroke(dp(1), Th.accentInk) } }, dp(8), dp(8), 0f, 0, 0, 7, 0)
+     put(text(label, 13f, if (selected) Th.accentInk else Th.ink, true), WRAP, WRAP)
+     isClickable = true; setOnClickListener { onClick() }
+     if (onLong != null) setOnLongClickListener { onLong(); true }
+@@ -113,6 +151,16 @@ fun Context.field(hint: String, single: Boolean = true, minLines: Int = 1): Edit
+     if (single) { setSingleLine(true); imeOptions = EditorInfo.IME_ACTION_DONE } else { inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES; this.minLines = minLines; gravity = Gravity.TOP or Gravity.START }
+ }
+ 
++/**
++ * Horizontally scrolling row of chips whose first chip lines up with the 20dp page margin.
++ * (The old code put the padding on a view that was then thrown away, so the chips sat flush against the screen edge.)
++ */
++fun Context.chipScroller(row: LinearLayout, side: Int = 20): HorizontalScrollView = HorizontalScrollView(this).apply {
++    isHorizontalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER
++    clipToPadding = false; setPadding(dp(side), 0, dp(side), 0)
++    addView(row, FrameLayout.LayoutParams(WRAP, WRAP))
++}
++
+ fun Context.hscroll(f: LinearLayout.() -> Unit): HorizontalScrollView = HorizontalScrollView(this).apply {
+     isHorizontalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER
+     addView(hbox { f() }, FrameLayout.LayoutParams(WRAP, WRAP))
+diff --git a/app/src/main/res/drawable/ic_expand.xml b/app/src/main/res/drawable/ic_expand.xml
+new file mode 100644
+index 0000000..5bd8c2c
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_expand.xml
+@@ -0,0 +1 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24"><path android:fillColor="#FFFFFFFF" android:pathData="M7.41 15.41 12 10.83l4.59 4.58L18 14l-6-6-6 6z"/></vector>

@@ -20,7 +20,7 @@ android {
         minSdk = 24
         targetSdk = 34
         versionCode = 100 + (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1)
-        versionName = "2.0.0"
+        versionName = "1.0.0"
         resourceConfigurations += listOf("en", "fr")
     }
 

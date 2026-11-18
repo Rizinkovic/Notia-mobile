@@ -20,7 +20,13 @@ import android.widget.ProgressBar
 import com.notia.mobile.core.Store
 import com.notia.mobile.sys.MainActivityLike
 import com.notia.mobile.sys.Reminders
+import com.notia.mobile.ui.L
 import com.notia.mobile.ui.MATCH
+import com.notia.mobile.ui.Sheet
+import com.notia.mobile.ui.EditorScreen
+import com.notia.mobile.ui.WRAP
+import com.notia.mobile.ui.pill
+import com.notia.mobile.ui.text
 import com.notia.mobile.ui.Screen
 import com.notia.mobile.ui.Tabs
 import com.notia.mobile.sys.Library
@@ -50,6 +56,7 @@ class MainActivity : Activity(), MainActivityLike {
     private var pickCb: ((Uri?) -> Unit)? = null
     private var permCb: ((Boolean) -> Unit)? = null
     private var pendingBook: Uri? = null
+    private var pendingNewNote = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,12 +65,13 @@ class MainActivity : Activity(), MainActivityLike {
         setContentView(root)
         applyBars()
         pendingBook = bookUriOf(intent)
+        pendingNewNote = intent?.getBooleanExtra(Reminders.EXTRA_NEW_NOTE, false) == true
         showLoading()
         val t0 = System.currentTimeMillis()
         Thread {
             Store.ensureLoaded(applicationContext)
             val wait = Math.max(0L, 700 - (System.currentTimeMillis() - t0))
-            ui.postDelayed({ if (!isFinishing) { applyBars(); start(0); openPending() } }, wait)
+            ui.postDelayed({ if (!isFinishing) { applyBars(); start(0); openPending(); openNewNote(); offerNotifications() } }, wait)
         }.start()
     }
 
@@ -101,7 +109,28 @@ class MainActivity : Activity(), MainActivityLike {
         super.onNewIntent(intent)
         setIntent(intent)
         pendingBook = bookUriOf(intent)
-        if (tabs != null) openPending()
+        pendingNewNote = intent.getBooleanExtra(Reminders.EXTRA_NEW_NOTE, false)
+        if (tabs != null) { openPending(); openNewNote() }
+    }
+
+    /** Tapping the morning "write something" notification lands straight in a blank note. */
+    private fun openNewNote() {
+        if (!pendingNewNote) return
+        pendingNewNote = false
+        intent = Intent()
+        push(EditorScreen(this, Store.addNote(null).id))
+    }
+
+    /** One friendly explanation before the Android 13+ permission dialog, shown a single time. */
+    private fun offerNotifications() {
+        if (Store.notifAsked || Reminders.hasPermission(this)) return
+        Store.notifAsked = true; Store.saveState()
+        val s = Sheet(this, L("Stay on track", "Restez régulier"))
+        s.body.put(text(L("Notia can remind you to write a note each morning, finish your tasks and get back to your books. You can change this any time in Settings.",
+            "Notia peut vous rappeler d’écrire une note chaque matin, de terminer vos tâches et de reprendre vos livres. Vous pouvez changer cela à tout moment dans les réglages."), 15f, Th.sub).apply { setLineSpacing(0f, 1.2f) }, MATCH, WRAP, 0f, 0, 0, 0, 16)
+        s.body.put(pill(L("Enable notifications", "Activer les notifications")) { s.dismiss(); requestNotifPermission { } })
+        s.body.put(pill(L("Not now", "Plus tard"), false) { s.dismiss() }, MATCH, WRAP, 0f, 0, 8, 0, 0)
+        s.show()
     }
 
     /** Adds the file to the library (once) and opens it in the reader. */
@@ -182,8 +211,20 @@ class MainActivity : Activity(), MainActivityLike {
         if (requestCode == 21) { val cb = permCb; permCb = null; cb?.invoke(grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) }
     }
 
-    override fun onResume() { super.onResume(); resumed = true; if (Store.loaded) Reminders.scheduleReading(this) }
-    override fun onPause() { resumed = false; if (Store.loaded) Store.flush(); super.onPause() }
+    override fun onResume() {
+        super.onResume(); resumed = true
+        if (Store.loaded) { Store.lastOpen = System.currentTimeMillis(); Reminders.scheduleAll(this) }
+    }
+
+    override fun onPause() {
+        resumed = false
+        if (Store.loaded) {
+            // remember when the app was last used: the "come back" reminder counts days from here
+            Store.lastOpen = System.currentTimeMillis(); Store.saveState(); Store.flush()
+            Reminders.scheduleIdle(this)
+        }
+        super.onPause()
+    }
     override fun onStop() { tabs?.lockVault(); super.onStop() }
 
     override fun onDestroy() { stack.forEach { it.onDestroy() }; super.onDestroy() }

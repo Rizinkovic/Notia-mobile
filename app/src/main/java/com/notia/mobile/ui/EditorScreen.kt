@@ -17,6 +17,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.notia.mobile.MainActivity
@@ -92,24 +93,19 @@ class EditorScreen(private val a: MainActivity, private val id: String) : Screen
 
     init {
         val n = note
-        // top bar
-        val top = a.hbox { setPadding(a.dp(8), a.dp(8), a.dp(8), 0) }
-        top.put(a.iconBtn(R.drawable.ic_back, L("Back", "Retour"), Th.ink, 24) { onBack() })
-        top.put(View(a), 0, 1, 1f)
-        top.put(a.iconBtn(R.drawable.ic_share, L("Share", "Partager"), Th.ink) { share() })
-        top.put(a.iconBtn(R.drawable.ic_delete, L("Delete", "Supprimer"), Th.danger) {
-            a.confirm(L("Delete this note?", "Supprimer cette note ?"), null, L("Delete", "Supprimer")) { done = true; Store.removeNote(id); a.pop() }
-        })
-        root.put(top)
+        // top bar: back on the left, share and delete on the right, all 44dp and vertically centred
+        root.put(a.pageHeader({ onBack() }, null,
+            a.iconBtn(R.drawable.ic_share, L("Share", "Partager"), Th.ink) { share() },
+            a.iconBtn(R.drawable.ic_delete, L("Delete", "Supprimer"), Th.danger) {
+                a.confirm(L("Delete this note?", "Supprimer cette note ?"), null, L("Delete", "Supprimer")) { done = true; Store.removeNote(id); a.pop() }
+            }))
         root.put(title, MATCH, WRAP, 0f, 0, 4, 0, 0)
         title.addTextChangedListener(object : TextWatcher {
             override fun afterTextChanged(s: Editable?) { val nn = note ?: return; val t = s?.toString() ?: ""; if (nn.title != t) { nn.title = t; Store.touch(nn); updateMeta() } }
             override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, af: Int) {}
             override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
         })
-        val hs = a.hscroll { setPadding(a.dp(20), 0, a.dp(20), 0) }
-        hs.removeAllViews(); hs.addView(chips, FrameLayout.LayoutParams(WRAP, WRAP))
-        root.put(hs, MATCH, WRAP, 0f, 0, 6, 0, 6)
+        root.put(a.chipScroller(chips), MATCH, WRAP, 0f, 0, 6, 0, 8)
         drawChips()
 
         // web editor
@@ -127,32 +123,47 @@ class EditorScreen(private val a: MainActivity, private val id: String) : Screen
         root.put(meta, MATCH, WRAP, 0f, 20, 4, 20, 6)
         updateMeta()
 
-        // toolbars
-        val bar = a.vbox { background = a.rounded(Th.card, 0f); setPadding(0, a.dp(4), 0, a.dp(4)) }
-        bar.put(a.hscroll {
-            setPadding(a.dp(8), 0, a.dp(8), 0)
-            put(a.iconBtn(R.drawable.ic_image, L("Image", "Image"), Th.accent) { pickImage() })
-            put(a.iconBtn(R.drawable.ic_link, L("Link", "Lien"), Th.accent) { linkSheet() })
-            put(a.iconBtn(R.drawable.ic_table, L("Table", "Tableau"), Th.accent) { tableSheet() })
-            put(a.iconBtn(R.drawable.ic_calc, L("Formula", "Formule"), Th.accent) { formulaSheet() })
-            put(a.iconBtn(R.drawable.ic_chart, L("Chart", "Graphique"), Th.accent) { chartSheet() })
-            put(View(a), a.dp(10), 1)
-            for (c in listOf(Th.ink, 0xFFE5484D.toInt(), 0xFFF2B33D.toInt(), 0xFF3FBF7F.toInt(), 0xFF3DA5E0.toInt(), 0xFF8B6CF6.toInt())) put(swatch(c, true), a.dp(30), a.dp(30), 0f, 3, 0, 3, 0)
-            put(View(a), a.dp(10), 1)
-            for (c in listOf(0xFFFFF3A3.toInt(), 0xFFC9F3D5.toInt(), 0xFFCDE6FF.toInt(), 0xFFFFD3E2.toInt(), 0)) put(swatch(c, false), a.dp(30), a.dp(30), 0f, 3, 0, 3, 0)
-        })
-        bar.put(a.hscroll {
-            setPadding(a.dp(8), 0, a.dp(8), 0)
-            put(a.iconBtn(R.drawable.ic_undo, L("Undo", "Annuler"), Th.ink) { js("cmd('undo')") })
-            put(a.iconBtn(R.drawable.ic_redo, L("Redo", "Rétablir"), Th.ink) { js("cmd('redo')") })
-            put(tbtn("H1", Typeface.BOLD) { js("block('h1')") }); put(tbtn("H2", Typeface.BOLD) { js("block('h2')") })
-            put(tbtn("B", Typeface.BOLD) { js("cmd('bold')") }); put(tbtn("I", Typeface.ITALIC) { js("cmd('italic')") })
-            put(tbtn("U", Typeface.NORMAL, true) { js("cmd('underline')") })
-            put(a.iconBtn(R.drawable.ic_bullets, L("Bullets", "Puces"), Th.ink) { js("cmd('insertUnorderedList')") })
-            put(a.iconBtn(R.drawable.ic_numbered, L("Numbered list", "Liste numérotée"), Th.ink) { js("cmd('insertOrderedList')") })
-            put(a.iconBtn(R.drawable.ic_code, L("Code", "Code"), Th.ink) { js("block('pre')") })
-            put(a.iconBtn(R.drawable.ic_hr, L("Line", "Ligne"), Th.ink) { js("cmd('insertHorizontalRule')") })
-        })
+        // toolbar: the basics are always one row; "all tools" opens a second panel above it
+        val bar = a.vbox { background = barBg(); elevation = a.dpf(8f); setPadding(a.dp(6), a.dp(6), a.dp(6), a.dp(6)) }
+        val extra = a.vbox {
+            put(cells(
+                tText("H1", Typeface.BOLD, desc = L("Heading 1", "Titre 1")) { js("block('h1')") },
+                tText("H2", Typeface.BOLD, desc = L("Heading 2", "Titre 2")) { js("block('h2')") },
+                tIcon(R.drawable.ic_code, L("Code", "Code")) { js("block('pre')") },
+                tIcon(R.drawable.ic_hr, L("Line", "Ligne")) { js("cmd('insertHorizontalRule')") },
+                tIcon(R.drawable.ic_link, L("Link", "Lien"), Th.accent) { linkSheet() },
+                tIcon(R.drawable.ic_image, L("Image", "Image"), Th.accent) { pickImage() },
+            ))
+            put(cells(
+                tIcon(R.drawable.ic_table, L("Table", "Tableau"), Th.accent) { tableSheet() },
+                tIcon(R.drawable.ic_calc, L("Formula", "Formule"), Th.accent) { formulaSheet() },
+                tIcon(R.drawable.ic_chart, L("Chart", "Graphique"), Th.accent) { chartSheet() },
+                tText("A", Typeface.BOLD, true, L("Text colour", "Couleur du texte"), 0xFFE5484D.toInt()) { swatchSheet(true) },
+                highlightBtn(),
+                tText("Tx", Typeface.NORMAL, false, L("Clear formatting", "Effacer la mise en forme"), Th.sub) { js("cmd('removeFormat')") },
+            ))
+            put(View(a).apply { setBackgroundColor(Th.line) }, MATCH, 1, 0f, 8, 4, 8, 4)
+        }
+        val chevron = ImageView(a).apply { setImageResource(R.drawable.ic_expand); setColorFilter(Th.accent) }
+        val toggle = FrameLayout(a).apply {
+            isClickable = true
+            // inset background: the touch area stays a full cell, the visible tile is slightly smaller
+            background = android.graphics.drawable.InsetDrawable(a.pressable(Th.field, 12f), a.dp(3))
+            addView(chevron, FrameLayout.LayoutParams(a.dp(22), a.dp(22), Gravity.CENTER))
+        }
+        toggle.setOnClickListener { Store.toolsAll = !Store.toolsAll; Store.saveState(); applyTools(bar, extra, chevron, toggle, true) }
+        bar.put(extra)
+        bar.put(cells(
+            tIcon(R.drawable.ic_undo, L("Undo", "Annuler")) { js("cmd('undo')") },
+            tIcon(R.drawable.ic_redo, L("Redo", "Rétablir")) { js("cmd('redo')") },
+            tText("B", Typeface.BOLD, desc = L("Bold", "Gras")) { js("cmd('bold')") },
+            tText("I", Typeface.ITALIC, desc = L("Italic", "Italique")) { js("cmd('italic')") },
+            tText("U", Typeface.NORMAL, true, L("Underline", "Souligné")) { js("cmd('underline')") },
+            tIcon(R.drawable.ic_bullets, L("Bullets", "Puces")) { js("cmd('insertUnorderedList')") },
+            tIcon(R.drawable.ic_numbered, L("Numbered list", "Liste numérotée")) { js("cmd('insertOrderedList')") },
+            toggle,
+        ))
+        applyTools(bar, extra, chevron, toggle, false)
         root.put(bar)
 
         val html = Pages.load(a, "editor.html", mapOf("%NONCE%" to Pages.nonce(), "%BG%" to cssColor(Th.bg), "%INK%" to cssColor(Th.ink), "%SUB%" to cssColor(Th.sub),
@@ -161,24 +172,70 @@ class EditorScreen(private val a: MainActivity, private val id: String) : Screen
         if (n == null) a.post(Runnable { a.pop() })
     }
 
-    private fun tbtn(label: String, style: Int, underline: Boolean = false, onClick: () -> Unit): TextView = a.text(label, 16f, Th.ink, true).apply {
-        setTypeface(Typeface.DEFAULT, if (style == Typeface.NORMAL) Typeface.BOLD else style)
-        if (underline) paintFlags = paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
-        gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(a.dp(44), a.dp(44)); isClickable = true; contentDescription = label
+    private fun barBg() = GradientDrawable().apply {
+        val r = a.dpf(22f); cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+        setColor(Th.card); setStroke(a.dp(1), Th.line)
+    }
+
+    /** Shows or hides the "all tools" panel and points the chevron the right way. */
+    private fun applyTools(bar: LinearLayout, extra: View, chevron: View, toggle: View, animate: Boolean) {
+        if (animate) android.transition.TransitionManager.beginDelayedTransition(bar)
+        val all = Store.toolsAll
+        extra.visibility = if (all) View.VISIBLE else View.GONE
+        chevron.rotation = if (all) 180f else 0f
+        toggle.contentDescription = if (all) L("Show basic tools only", "Afficher les outils de base") else L("Show all tools", "Afficher tous les outils")
+    }
+
+    /** A row of equally wide, 44dp-tall cells so every button gets the same comfortable touch area. */
+    private fun cells(vararg c: View): LinearLayout = a.hbox().also { r -> for (v in c) r.put(v, 0, a.dp(44), 1f) }
+
+    private fun tIcon(res: Int, desc: String, tint: Int = Th.ink, onClick: () -> Unit): View = FrameLayout(a).apply {
+        contentDescription = desc; isClickable = true; background = a.pressable(Color.TRANSPARENT, 12f)
+        addView(android.widget.ImageView(a).apply { setImageResource(res); setColorFilter(tint) }, FrameLayout.LayoutParams(a.dp(22), a.dp(22), Gravity.CENTER))
         setOnClickListener { onClick() }
     }
 
-    private fun swatch(color: Int, ink: Boolean): View = View(a).apply {
-        background = GradientDrawable().apply {
-            shape = if (ink) GradientDrawable.OVAL else GradientDrawable.RECTANGLE
-            if (!ink) cornerRadius = a.dpf(8f)
-            if (color == 0) { setColor(Color.TRANSPARENT); setStroke(a.dp(2), Th.sub) } else { setColor(color); setStroke(a.dp(1), Th.line) }
+    private fun tText(label: String, style: Int, underline: Boolean = false, desc: String = label, color: Int = Th.ink, onClick: () -> Unit): View = a.text(label, 16f, color, true).apply {
+        setTypeface(Typeface.DEFAULT, if (style == Typeface.NORMAL) Typeface.BOLD else style)
+        if (underline) paintFlags = paintFlags or android.graphics.Paint.UNDERLINE_TEXT_FLAG
+        gravity = Gravity.CENTER; isClickable = true; contentDescription = desc; background = a.pressable(Color.TRANSPARENT, 12f)
+        setOnClickListener { onClick() }
+    }
+
+    private fun highlightBtn(): View = FrameLayout(a).apply {
+        contentDescription = L("Highlight", "Surlignage"); isClickable = true; background = a.pressable(Color.TRANSPARENT, 12f)
+        addView(a.text("A", 15f, 0xFF1B1830.toInt(), true).apply { gravity = Gravity.CENTER; background = a.rounded(0xFFFFE08A.toInt(), 8f) }, FrameLayout.LayoutParams(a.dp(28), a.dp(28), Gravity.CENTER))
+        setOnClickListener { swatchSheet(false) }
+    }
+
+    /** Colour picker: big, labelled swatches instead of 11 tiny dots in a scrolling row. */
+    private fun swatchSheet(ink: Boolean) {
+        val s = Sheet(a, if (ink) L("Text colour", "Couleur du texte") else L("Highlight", "Surlignage"))
+        val colors: List<Int> = if (ink)
+            listOf(Th.ink, 0xFFE5484D.toInt(), 0xFFF76B15.toInt(), 0xFFF2B33D.toInt(), 0xFF3FBF7F.toInt(), 0xFF12A594.toInt(), 0xFF3DA5E0.toInt(), 0xFF3E63DD.toInt(), 0xFF8B6CF6.toInt(), 0xFFEF6B9A.toInt())
+        else listOf(0xFFFFF3A3.toInt(), 0xFFC9F3D5.toInt(), 0xFFCDE6FF.toInt(), 0xFFFFD3E2.toInt(), 0xFFFFE0B8.toInt(), 0xFFE4D9FF.toInt(), 0)
+        for (chunk in colors.chunked(5)) {
+            val r = a.hbox()
+            for (c in chunk) r.put(FrameLayout(a).apply {
+                isClickable = true
+                contentDescription = if (ink) L("Text colour", "Couleur du texte") else L("Highlight", "Surlignage")
+                background = a.pressable(Color.TRANSPARENT, 14f)
+                addView(View(a).apply {
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        if (c == 0) { setColor(Color.TRANSPARENT); setStroke(a.dp(2), Th.sub) } else { setColor(c); setStroke(a.dp(1), Th.line) }
+                    }
+                }, FrameLayout.LayoutParams(a.dp(40), a.dp(40), Gravity.CENTER))
+                if (c == 0) addView(a.text("✕", 14f, Th.sub, true), FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER))
+                setOnClickListener {
+                    if (ink) js("cmd('foreColor','${cssColor(c)}')") else js("cmd('hiliteColor','${if (c == 0) "transparent" else cssColor(c)}')")
+                    s.dismiss()
+                }
+            }, 0, a.dp(56), 1f)
+            repeat(5 - chunk.size) { r.put(View(a), 0, a.dp(56), 1f) }
+            s.body.put(r)
         }
-        isClickable = true
-        contentDescription = if (ink) L("Text colour", "Couleur du texte") else L("Highlight", "Surlignage")
-        setOnClickListener {
-            if (ink) js("cmd('foreColor','${cssColor(color)}')") else js("cmd('hiliteColor','${if (color == 0) "transparent" else cssColor(color)}')")
-        }
+        s.show()
     }
 
     private fun drawChips() {
