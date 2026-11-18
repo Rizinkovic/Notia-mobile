@@ -6,7 +6,10 @@ plugins {
 // Release signing: use the repository secrets when present (see README), otherwise the bundled
 // debug key. The bundled key is the one the previous Expo build used, so the new APK installs
 // over it and keeps the user's data.
-val keystoreFile = System.getenv("NOTIA_KEYSTORE_FILE")?.let { file(it) } ?: file("notia-debug.keystore")
+// GitHub passes missing secrets as EMPTY variables, so blank must count as "not set".
+fun env(name: String, default: String): String = System.getenv(name)?.takeIf { it.isNotBlank() } ?: default
+
+val keystoreFile = file(env("NOTIA_KEYSTORE_FILE", "notia-debug.keystore"))
 
 android {
     namespace = "com.notia.mobile"
@@ -24,9 +27,9 @@ android {
     signingConfigs {
         create("release") {
             storeFile = keystoreFile
-            storePassword = System.getenv("NOTIA_KEYSTORE_PASSWORD") ?: "android"
-            keyAlias = System.getenv("NOTIA_KEY_ALIAS") ?: "androiddebugkey"
-            keyPassword = System.getenv("NOTIA_KEY_PASSWORD") ?: "android"
+            storePassword = env("NOTIA_KEYSTORE_PASSWORD", "android")
+            keyAlias = env("NOTIA_KEY_ALIAS", "androiddebugkey")
+            keyPassword = env("NOTIA_KEY_PASSWORD", "android")
         }
     }
 
