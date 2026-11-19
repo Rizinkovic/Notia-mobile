@@ -79,9 +79,6 @@ class ReaderScreen(private val a: MainActivity, bookId: String) : Screen() {
         fun sep() = View(a).apply { setBackgroundColor(if (Store.dark) 0x33FFFFFF else 0x22000000) }
         val pill = a.hbox {
             background = a.glass(32f); elevation = a.dpf(10f); setPadding(a.dp(8), a.dp(6), a.dp(8), a.dp(6))
-            put(a.iconBtn(R.drawable.ic_minus, L("Zoom out", "Réduire"), Th.ink, 22) { zoom(-1) }, a.dp(44), a.dp(44), 0f, 0, 0, 2, 0)
-            put(a.iconBtn(R.drawable.ic_add, L("Zoom in", "Agrandir"), Th.ink, 22) { zoom(1) }, a.dp(44), a.dp(44), 0f, 0, 0, 4, 0)
-            put(sep(), 1, a.dp(24), 0f, 0, 0, 4, 0)
             put(a.iconBtn(R.drawable.ic_pen, L("Highlight", "Surligner"), lastColor, 22) { highlight(lastColor) }, a.dp(44), a.dp(44), 0f, 0, 0, 2, 0)
             put(a.iconBtn(R.drawable.ic_bookmark, L("Bookmark", "Marque-page"), Th.ink, 22) { bookmark() }, a.dp(44), a.dp(44), 0f, 0, 0, 4, 0)
             put(sep(), 1, a.dp(24), 0f, 0, 0, 4, 0)
@@ -186,6 +183,20 @@ class ReaderScreen(private val a: MainActivity, bookId: String) : Screen() {
         w.setBackgroundColor(Th.bg)
         w.settings.apply { javaScriptEnabled = true; allowFileAccess = false; allowContentAccess = false; setSupportZoom(false); blockNetworkLoads = false; mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW }
         w.addJavascriptInterface(Bridge(), "Notia")
+        // Pinch to zoom is detected here, not in the page: a JavaScript touchmove handler would make the browser wait
+        // for the script on every finger movement and make normal scrolling stutter.
+        var acc = 1f; var lastZ = 0L
+        val pinch = android.view.ScaleGestureDetector(a, object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScaleBegin(d: android.view.ScaleGestureDetector): Boolean { acc = 1f; lastZ = 0L; return true }
+            override fun onScale(d: android.view.ScaleGestureDetector): Boolean {
+                acc *= d.scaleFactor
+                val now = android.os.SystemClock.uptimeMillis()
+                if (now - lastZ > 80 && Math.abs(acc - 1f) > 0.02f) { w.evaluateJavascript("zoomMul($acc)", null); acc = 1f; lastZ = now }
+                return true
+            }
+            override fun onScaleEnd(d: android.view.ScaleGestureDetector) { if (Math.abs(acc - 1f) > 0.005f) w.evaluateJavascript("zoomMul($acc)", null); acc = 1f }
+        })
+        w.setOnTouchListener { _, ev -> pinch.onTouchEvent(ev); false }
         val html = Pages.load(a, "reader.html", mapOf("%NONCE%" to page, "%BG%" to cssColor(Th.bg), "%INK%" to cssColor(Th.ink), "%SUB%" to cssColor(Th.sub),
             "%ACCENT%" to cssColor(Th.accent), "%HL%" to "#FFE08A", "%ZOOM%" to Store.textZoom.toString(), "%COMIC%" to t.comic.toString(), "%LOADING%" to L("Opening…", "Ouverture…"))).toByteArray(Charsets.UTF_8)
         w.webViewClient = object : WebViewClient() {
@@ -198,7 +209,7 @@ class ReaderScreen(private val a: MainActivity, bookId: String) : Screen() {
                     when {
                         path == "/reader.html" -> ok("text/html", html)
                         path == "/content.html" -> ok("text/html", t.contentHtml().toByteArray(Charsets.UTF_8))
-                        path.startsWith("/z/") || path.startsWith("/m/") -> t.resource(path.substring(3))?.let { WebResourceResponse(it.mime, null, 200, "OK", mapOf("Cache-Control" to "no-store"), ByteArrayInputStream(it.data)) } ?: blocked()
+                        path.startsWith("/z/") || path.startsWith("/m/") -> t.resource(path.substring(3))?.let { WebResourceResponse(it.mime, null, 200, "OK", mapOf("Cache-Control" to "private, max-age=3600"), ByteArrayInputStream(it.data)) } ?: blocked()
                         else -> blocked()
                     }
                 } catch (e: Exception) { blocked() }
@@ -241,12 +252,6 @@ class ReaderScreen(private val a: MainActivity, bookId: String) : Screen() {
 
     private fun clearSelection() {
         pdf?.clearSelection(); web?.evaluateJavascript("clearSel()", null); webSel = ""; selBar.visibility = View.GONE
-    }
-
-    /** +1 = bigger, -1 = smaller. PDFs scale the page (always sharp); ebooks scale the text and reflow it. */
-    private fun zoom(dir: Int) {
-        val p = pdf
-        if (p != null) p.zoomBy(if (dir > 0) 1.25f else 1f / 1.25f) else web?.evaluateJavascript("zoomBy($dir)", null)
     }
 
     private fun bookmark() {

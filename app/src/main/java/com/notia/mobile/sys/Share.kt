@@ -122,13 +122,34 @@ object Library {
     private fun kindOf(ext: String, mime: String): String? = when {
         ext == "pdf" || mime == "application/pdf" -> "pdf"
         ext == "epub" || mime == "application/epub+zip" -> "epub"
-        ext in setOf("mobi", "azw", "azw3", "prc") || mime.contains("mobipocket") -> "mobi"
+        ext in setOf("mobi", "azw", "azw3", "prc") || mime.contains("mobi") || mime.contains("amazon") -> "mobi"
         ext == "docx" || mime.contains("wordprocessingml") -> "docx"
         ext == "cbz" || mime == "application/vnd.comicbook+zip" || mime == "application/x-cbz" -> "cbz"
         ext == "txt" || mime == "text/plain" -> "txt"
         ext == "html" || ext == "htm" || mime == "text/html" -> "html"
         else -> null
     }
+
+    /** Last resort for files with a missing or misleading name/type: look at the first bytes. */
+    private fun sniff(ctx: Context, uri: Uri): String? = try {
+        val h = ctx.contentResolver.openInputStream(uri)?.use { it.readNBytesCompat(100) } ?: ByteArray(0)
+        fun s(o: Int, n: Int) = if (h.size >= o + n) String(h, o, n, Charsets.ISO_8859_1) else ""
+        when {
+            s(0, 4) == "%PDF" -> "pdf"
+            s(60, 8) == "BOOKMOBI" || s(60, 8) == "TEXtREAd" -> "mobi"
+            s(0, 2) == "PK" -> {
+                val nameLen = if (h.size > 28) (h[26].toInt() and 0xFF) or ((h[27].toInt() and 0xFF) shl 8) else 0
+                val first = s(30, Math.min(nameLen, Math.max(0, h.size - 30))).lowercase()
+                when {
+                    first == "mimetype" -> "epub"
+                    first.startsWith("[content_types]") -> "docx"
+                    first.substringAfterLast('.', "") in setOf("jpg", "jpeg", "png", "gif", "webp", "bmp") -> "cbz"
+                    else -> null
+                }
+            }
+            else -> null
+        }
+    } catch (e: Exception) { null }
 
     private fun titleOf(name: String) = name.substringBeforeLast('.', name).replace('_', ' ').trim().ifEmpty { "Book" }.take(120)
 
@@ -155,7 +176,7 @@ object Library {
         if (Store.books.size >= MAX_BOOKS) throw Fail("limit")
         val (name, size) = meta(ctx, uri)
         val ext = name.substringAfterLast('.', "").lowercase()
-        val kind = kindOf(ext, ctx.contentResolver.getType(uri) ?: "") ?: throw Fail("unsupported")
+        val kind = kindOf(ext, ctx.contentResolver.getType(uri) ?: "") ?: sniff(ctx, uri) ?: throw Fail("unsupported")
         if (size > MAX_BYTES) throw Fail("big")
         val id = newId()
         val fileName = "${System.currentTimeMillis()}.$kind"

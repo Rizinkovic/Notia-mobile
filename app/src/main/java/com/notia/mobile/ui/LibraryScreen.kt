@@ -118,7 +118,8 @@ class LibraryScreen(private val a: MainActivity) : Screen() {
     private fun addBook() {
         if (importing) return
         if (Store.books.size >= Library.MAX_BOOKS) { a.toast(L("Library is full (10 books max). Remove one first.", "Bibliothèque pleine (10 livres max). Retirez-en un d’abord.")); return }
-        a.pick(arrayOf("application/pdf", "application/epub+zip", "application/x-mobipocket-ebook", "application/vnd.comicbook+zip", "application/x-cbz", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain", "text/html", "application/octet-stream")) { uri ->
+        // no MIME filter: Android reports .mobi, .azw3 and .cbz under many different types (or none), so a filter hides them; the file is checked after picking
+        a.pick(arrayOf("*/*")) { uri ->
             if (uri == null) return@pick
             importing = true; a.toast(L("Adding book…", "Ajout du livre…"))
             Thread {

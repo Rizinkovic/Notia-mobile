@@ -23,7 +23,7 @@ formulas, charts, undo/redo; categories; search; character count; created/modifi
 text/PDF/DOCX; **tasks with an alarm (type a task, pick e.g. 8 PM, and the phone rings at that minute even asleep; Done and Snooze
 buttons; tap a task to add, change or remove its alarm; survives reboot and app updates)**; library of 10 books (PDF, EPUB,
 MOBI/AZW, **CBZ comics**, DOCX, TXT, HTML) with covers, progress, reading time, bookmarks, **coloured highlights**, **table of contents**,
-**zoom** (pinch, double-tap or the +/- buttons) and **select and copy text** (PDF and ebooks), daily "finish your book" reminder; vault (AES-256-GCM in the
+**zoom** (pinch with two fingers; double-tap on PDFs) and **select and copy text** (PDF and ebooks), daily "finish your book" reminder; vault (AES-256-GCM in the
 Android Keystore, PIN or password, lockout, screenshot-blocked); Wi-Fi send/receive, desktop QR sync (same protocol
 as Notia Desktop) and phone-to-desktop send by scanning the desktop QR code; dark/light; English/French.
 
@@ -44,10 +44,10 @@ Notes, categories, tasks and library (including book files and covers) are migra
 The password vault cannot be migrated (the old one used a different secure store): create the vault again.
 
 ## Reading, zoom, copy and highlight
-* **PDF:** pinch, double-tap or +/- to zoom (1x to 5x, always sharp: pages are drawn in tiles at screen resolution). Long-press a word to select,
+* **PDF:** pinch with two fingers (or double-tap) to zoom, 1x to 5x, always sharp: pages are drawn at screen resolution in the background, a little ahead of your scrolling. Long-press a word to select,
   drag the two handles to extend, then **Copy** or tap a colour to highlight. "All" selects the page. Scanned PDFs have no text layer to select.
-* **EPUB / MOBI / DOCX / TXT:** pinch or +/- changes the text size and reflows the page; the size is remembered. Select text for Copy or a colour.
-* **CBZ comics:** pages are shown top to bottom; pinch or +/- widens the pages, drag to pan.
+* **EPUB / MOBI / DOCX / TXT:** pinching changes the text size and reflows the page; the size is remembered. Select text for Copy or a colour.
+* **CBZ comics:** pages are shown top to bottom; pinching widens the pages, drag to pan.
 * Highlights are saved per book (Contents panel → Highlights).
 
 ## Notes
@@ -57,6 +57,12 @@ The password vault cannot be migrated (the old one used a different secure store
 * PDF text selection is read by PDFBox, which adds a few MB to the APK.
 
 ## Changelog
+### 1.1.1
+* **MOBI / AZW3 / CBZ files now show up:** the file picker no longer filters by MIME type (Android reports these formats under many types, or none), and "Open with Notia" now also matches the generic and Amazon types that Downloads and file managers use. Files with a missing or wrong name are recognised from their first bytes. KF8-only AZW3 files are still not readable (convert to EPUB); normal MOBI files, including MOBI/KF8 hybrids, open.
+* **Zoom is pinch only:** the +/- buttons are gone. Ebook pinch is now detected natively, so one-finger scrolling is no longer slowed by a page script.
+* **Smoother PDFs:** one render per page at normal zoom, tiles prefetched ahead of the scroll, long PDFs open on their first page's size and are measured in the background, progress saved at most every 150 ms.
+* Comic pages are cached while reading.
+
 ### 1.1.0
 * **Zoom** in PDFs (pinch, double-tap, +/- buttons, 1x-5x, sharp tiles) and in ebooks (pinch/+/- text size, remembered). Comics zoom by page width.
 * **Copy text from PDFs** (long-press, handles, Copy, select page) and from ebooks. **Highlights in five colours** in PDFs and ebooks, saved per book.

@@ -175,10 +175,49 @@ class PdfView(
                 val count = r.pageCount
                 if (count <= 0) throw java.io.IOException("empty")
                 val w = FloatArray(count); val h = FloatArray(count)
-                for (i in 0 until count) { val pg = r.openPage(i); try { w[i] = pg.width.toFloat(); h[i] = pg.height.toFloat() } finally { pg.close() } }
-                a.post(Runnable { if (!closed) ready(w, h) })
+                val eager = count <= 40
+                // a long PDF opens at once on the size of its first page; the other pages are measured in the background
+                val upto = if (eager) count else 1
+                for (i in 0 until upto) { val pg = r.openPage(i); try { w[i] = pg.width.toFloat(); h[i] = pg.height.toFloat() } finally { pg.close() } }
+                if (!eager) { java.util.Arrays.fill(w, 1, count, w[0]); java.util.Arrays.fill(h, 1, count, h[0]) }
+                a.post(Runnable { if (!closed) { ready(w, h); if (!eager) scanSizes(w.copyOf(), h.copyOf(), 1, false) } })
             } catch (e: Throwable) { a.post(Runnable { if (!closed) onError() }) }
         }
+    }
+
+    /** Measures pages 10 at a time so tile rendering is never kept waiting; applies the result once, if any page differs. */
+    private fun scanSizes(w: FloatArray, h: FloatArray, from: Int, diff: Boolean) {
+        if (closed) return
+        io.execute {
+            var changed = diff
+            val to = Math.min(w.size, from + 10)
+            try {
+                val r = renderer
+                if (r != null && !closed) for (i in from until to) {
+                    val pg = r.openPage(i)
+                    try {
+                        if (Math.abs(pg.width - w[i]) > 1f || Math.abs(pg.height - h[i]) > 1f) changed = true
+                        w[i] = pg.width.toFloat(); h[i] = pg.height.toFloat()
+                    } finally { pg.close() }
+                }
+            } catch (e: Throwable) { return@execute }
+            val ch = changed
+            a.post(Runnable {
+                if (closed) return@Runnable
+                if (to < w.size) scanSizes(w, h, to, ch) else if (ch) refineSizes(w, h)
+            })
+        }
+    }
+
+    /** Real page sizes arrived: re-lay out and keep the page that is on screen exactly where it was. */
+    private fun refineSizes(w: FloatArray, h: FloatArray) {
+        if (n == 0 || w.size != n) return
+        val idx = pageAtY(sy)
+        val frac = if (dhI[idx] > 0) (sy - tops[idx]) / dhI[idx] else 0f
+        pw = w; ph = h
+        tiles.evictAll(); thumbs.evictAll(); pending.clear(); thumbPending.clear()
+        layoutPages()
+        sy = tops[idx] + frac * dhI[idx]; clampScroll(); invalidate()
     }
 
     private fun ready(w: FloatArray, h: FloatArray) {
@@ -198,10 +237,17 @@ class PdfView(
         contentH = y + bottomRoom
     }
 
+    /** At normal zoom one bitmap per page (one render call per page); zoomed in, 512 px tiles keep memory bounded. */
+    private fun whole(i: Int) = zoom <= 1.25f && dhI[i] <= 3200
+    private fun tileW(i: Int) = if (whole(i)) dwI else T
+    private fun tileH(i: Int) = if (whole(i)) dhI[i] else T
+
     private fun room() = Math.max(1f, contentH - height)
     fun fraction(): Double = (sy / room()).toDouble().coerceIn(0.0, 1.0)
     private fun clampScroll() { sx = sx.coerceIn(0f, Math.max(0f, contentW - width)); sy = sy.coerceIn(0f, Math.max(0f, contentH - height)) }
-    private fun notifyProgress() { if (n > 0) onProgress(fraction()) }
+    private var progressQueued = false
+    private val progressRun = Runnable { progressQueued = false; if (!closed && n > 0) onProgress(fraction()) }
+    private fun notifyProgress() { if (n > 0 && !progressQueued) { progressQueued = true; postDelayed(progressRun, 150) } }
 
     fun jump(p: Double) { sy = p.coerceIn(0.0, 1.0).toFloat() * room(); clampScroll(); invalidate(); notifyProgress() }
     fun jumpToPage(page: Int) { if (n > 0) { sy = (tops[(page - 1).coerceIn(0, n - 1)] - pad).coerceAtLeast(0f); clampScroll(); invalidate(); notifyProgress() } }
@@ -246,20 +292,34 @@ class PdfView(
             i++
         }
         c.restore()
+        if (pinch == 1f) { val m = height * 0.8f; prefetch(visL, visT - m, visR, visT); prefetch(visL, visB, visR, visB + m) }
+    }
+
+    /** Starts rendering tiles just outside the screen so they are ready before they scroll into view. */
+    private fun prefetch(l: Float, t: Float, r: Float, b: Float) {
+        var i = pageAtY(Math.max(0f, t))
+        while (i < n && tops[i] < b) {
+            if (tops[i] + dhI[i] >= t) forTiles(i, l, t, r, b) { tx, ty, k -> if (tiles.get(k) == null) requestTile(i, tx, ty, k) }
+            i++
+        }
+    }
+
+    private inline fun forTiles(i: Int, l: Float, t: Float, r: Float, b: Float, fn: (Int, Int, Long) -> Unit) {
+        val tw = tileW(i); val th = tileH(i)
+        val tilesX = (dwI + tw - 1) / tw; val tilesY = (dhI[i] + th - 1) / th
+        val x0 = Math.max(0, Math.floor(((l - left) / tw).toDouble()).toInt()); val x1 = Math.min(tilesX - 1, Math.floor(((r - left) / tw).toDouble()).toInt())
+        val y0 = Math.max(0, Math.floor(((t - tops[i]) / th).toDouble()).toInt()); val y1 = Math.min(tilesY - 1, Math.floor(((b - tops[i]) / th).toDouble()).toInt())
+        for (ty in y0..y1) for (tx in x0..x1) { val k = key(i, tx, ty); wanted.add(k); fn(tx, ty, k) }
     }
 
     private fun drawPage(c: Canvas, i: Int, pl: Float, pt: Float, pwid: Float, phei: Float, visL: Float, visT: Float, visR: Float, visB: Float) {
         c.drawRect(pl, pt, pl + pwid, pt + phei, white)
-        val th = thumbs.get(i)
-        if (th != null) c.drawBitmap(th, null, RectF(pl, pt, pl + pwid, pt + phei), bmpPaint) else requestThumb(i)
-        val tilesX = (dwI + T - 1) / T; val tilesY = (dhI[i] + T - 1) / T
-        val x0 = Math.max(0, Math.floor(((visL - pl) / T).toDouble()).toInt()); val x1 = Math.min(tilesX - 1, Math.floor(((visR - pl) / T).toDouble()).toInt())
-        val y0 = Math.max(0, Math.floor(((visT - pt) / T).toDouble()).toInt()); val y1 = Math.min(tilesY - 1, Math.floor(((visB - pt) / T).toDouble()).toInt())
-        for (ty in y0..y1) for (tx in x0..x1) {
-            val k = key(i, tx, ty)
-            wanted.add(k)
+        val thumb = thumbs.get(i)
+        if (thumb != null) c.drawBitmap(thumb, null, RectF(pl, pt, pl + pwid, pt + phei), bmpPaint) else requestThumb(i)
+        val tw = tileW(i); val th = tileH(i)
+        forTiles(i, visL, visT, visR, visB) { tx, ty, k ->
             val b = tiles.get(k)
-            if (b != null) c.drawBitmap(b, pl + tx * T, pt + ty * T, bmpPaint) else requestTile(i, tx, ty, k)
+            if (b != null) c.drawBitmap(b, pl + tx * tw, pt + ty * th, bmpPaint) else requestTile(i, tx, ty, k)
         }
         // saved highlights
         for (m in marks) if (m.page == i + 1) {
@@ -276,7 +336,7 @@ class PdfView(
 
     private fun requestTile(i: Int, tx: Int, ty: Int, k: Long) {
         if (!pending.add(k)) return
-        val dw = dwI; val dh = dhI[i]
+        val dw = dwI; val dh = dhI[i]; val tW = tileW(i); val tH = tileH(i)
         io.execute {
             var bmp: Bitmap? = null
             try {
@@ -284,12 +344,12 @@ class PdfView(
                 if (r != null && !closed && wanted.contains(k)) {
                     val pg = r.openPage(i)
                     try {
-                        val bw = Math.min(T, dw - tx * T); val bh = Math.min(T, dh - ty * T)
+                        val bw = Math.min(tW, dw - tx * tW); val bh = Math.min(tH, dh - ty * tH)
                         if (bw > 0 && bh > 0) {
                             val b = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
                             b.eraseColor(Color.WHITE)
                             val m = Matrix(); val s = dw.toFloat() / pg.width
-                            m.setScale(s, s); m.postTranslate(-(tx * T).toFloat(), -(ty * T).toFloat())
+                            m.setScale(s, s); m.postTranslate(-(tx * tW).toFloat(), -(ty * tH).toFloat())
                             pg.render(b, null, m, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                             bmp = b
                         }
@@ -503,8 +563,9 @@ class PdfView(
     }
 
     fun close() {
+        if (n > 0 && !closed) onProgress(fraction())
         closed = true
-        removeCallbacks(flingStep)
+        removeCallbacks(flingStep); removeCallbacks(progressRun)
         io.execute { try { renderer?.close(); pfd?.close() } catch (e: Exception) {} }
         io.shutdown()
         textIo.execute { try { pd?.close() } catch (e: Exception) {} }

@@ -39,8 +39,15 @@
                 <data android:mimeType="application/pdf" />
                 <data android:mimeType="application/epub+zip" />
                 <data android:mimeType="application/x-mobipocket-ebook" />
+                <data android:mimeType="application/x-mobipocket" />
+                <data android:mimeType="application/vnd.amazon.ebook" />
+                <data android:mimeType="application/vnd.amazon.mobi8-ebook" />
+                <data android:mimeType="application/x-mobi8-ebook" />
+                <data android:mimeType="application/mobi" />
+                <data android:mimeType="application/x-mobi" />
                 <data android:mimeType="application/vnd.comicbook+zip" />
                 <data android:mimeType="application/x-cbz" />
+                <data android:mimeType="application/octet-stream" />
                 <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
                 <data android:mimeType="text/plain" />
             </intent-filter>
@@ -58,6 +65,9 @@
                 <data android:pathPattern=".*\\.pdf" />
                 <data android:pathPattern=".*\\.PDF" />
                 <data android:pathPattern=".*\\.mobi" />
+                <data android:pathPattern=".*\\.MOBI" />
+                <data android:pathPattern=".*\\.prc" />
+                <data android:pathPattern=".*\\.AZW3?" />
                 <data android:pathPattern=".*\\.azw3?" />
                 <data android:pathPattern=".*\\.cbz" />
                 <data android:pathPattern=".*\\.CBZ" />
@@ -69,8 +79,15 @@
                 <data android:mimeType="application/pdf" />
                 <data android:mimeType="application/epub+zip" />
                 <data android:mimeType="application/x-mobipocket-ebook" />
+                <data android:mimeType="application/x-mobipocket" />
+                <data android:mimeType="application/vnd.amazon.ebook" />
+                <data android:mimeType="application/vnd.amazon.mobi8-ebook" />
+                <data android:mimeType="application/x-mobi8-ebook" />
+                <data android:mimeType="application/mobi" />
+                <data android:mimeType="application/x-mobi" />
                 <data android:mimeType="application/vnd.comicbook+zip" />
                 <data android:mimeType="application/x-cbz" />
+                <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
 
