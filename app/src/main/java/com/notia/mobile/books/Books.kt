@@ -28,6 +28,8 @@ abstract class TextBook : Closeable {
     abstract fun contentHtml(): String
     abstract fun resource(path: String): Res?
     open fun cover(): ByteArray? = null
+    /** Image pages (comics): the reader zooms the page width instead of the text size. */
+    open val comic: Boolean get() = false
     /** Native table of contents; empty when the format has none (the reader then falls back to headings). */
     open fun toc(): List<TocItem> = emptyList()
     override fun close() {}
@@ -502,8 +504,80 @@ class DocxBook(file: File) : TextBook() {
     override fun close() { try { zip.z.close() } catch (e: Exception) {} }
 }
 
+private val IMG_EXT = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp")
+
+/** Natural order, so page2 comes before page10. */
+private fun natCmp(a: String, b: String): Int {
+    var i = 0; var j = 0
+    while (i < a.length && j < b.length) {
+        val ca = a[i]; val cb = b[j]
+        if (ca.isDigit() && cb.isDigit()) {
+            var ie = i; while (ie < a.length && a[ie].isDigit()) ie++
+            var je = j; while (je < b.length && b[je].isDigit()) je++
+            val na = a.substring(i, ie).trimStart('0'); val nb = b.substring(j, je).trimStart('0')
+            if (na.length != nb.length) return na.length - nb.length
+            val c = na.compareTo(nb); if (c != 0) return c
+            i = ie; j = je
+        } else { if (ca != cb) return ca - cb; i++; j++ }
+    }
+    return (a.length - i) - (b.length - j)
+}
+
+/** Comic book archive (.cbz): a zip of page images, read top to bottom. */
+class CbzBook(file: File) : TextBook() {
+    private val zip: Zip
+    private val html: String
+    private val first: ByteArray?
+    private val tocItems: List<TocItem>
+    override val comic: Boolean get() = true
+
+    init {
+        val zf = try { ZipFile(file) } catch (e: Exception) { throw BookException("invalid", "Not a valid CBZ.") }
+        zip = Zip(zf)
+        try {
+            val names = ArrayList<String>()
+            for (e in zf.entries()) {
+                if (e.isDirectory) continue
+                val n = e.name
+                if (n.startsWith("__MACOSX/") || n.substringAfterLast('/').startsWith(".")) continue
+                if (n.substringAfterLast('.', "").lowercase() in IMG_EXT) names.add(n)
+            }
+            if (names.isEmpty()) throw BookException("empty", "No pages found in this comic.")
+            names.sortWith { x, y -> natCmp(x.lowercase(), y.lowercase()) }
+            val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            val sb = StringBuilder()
+            for (n in names) {
+                // page size up front: the layout (and so the saved reading position) stays stable while images load
+                var w = 0; var h = 0
+                try {
+                    opts.outWidth = 0; opts.outHeight = 0
+                    zf.getInputStream(zf.getEntry(n)).use { android.graphics.BitmapFactory.decodeStream(it, null, opts) }
+                    w = opts.outWidth; h = opts.outHeight
+                } catch (e: Exception) {}
+                sb.append("<section data-p=\"").append(esc(n)).append("\"><img loading=\"lazy\" alt=\"\" src=\"/z/").append(encPath(n)).append("\"")
+                if (w > 0 && h > 0) sb.append(" width=\"").append(w).append("\" height=\"").append(h).append("\"")
+                sb.append("></section>")
+            }
+            html = sb.toString()
+            first = zip.bytes(names[0])
+            val step = Math.max(1, names.size / 40)
+            tocItems = (0 until names.size step step).map { TocItem("Page ${it + 1}", names[it], "", 0) }
+        } catch (e: BookException) { zf.close(); throw e }
+        catch (e: OutOfMemoryError) { zf.close(); throw BookException("memory", "Out of memory.") }
+        catch (e: Exception) { zf.close(); throw BookException("invalid", e.message ?: "Invalid CBZ.") }
+    }
+
+    override fun contentHtml() = html
+    override fun resource(path: String): Res? { val b = zip.bytes(path) ?: return null; return Res(mimeByName(path), b) }
+    override fun cover() = first
+    override fun toc() = tocItems
+    override fun close() { try { zip.z.close() } catch (e: Exception) {} }
+}
+
+
 fun openTextBook(kind: String, file: File): TextBook = when (kind) {
     "epub" -> EpubBook(file)
+    "cbz" -> CbzBook(file)
     "mobi" -> MobiBook(file.readBytes())
     "docx" -> DocxBook(file)
     "html" -> PlainBook(file, true)

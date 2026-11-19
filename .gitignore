@@ -7,3 +7,4 @@ captures/
 *.jks
 *.keystore
 !app/notia-debug.keystore
+notia-changes.patch

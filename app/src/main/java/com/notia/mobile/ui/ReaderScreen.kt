@@ -1,6 +1,10 @@
 package com.notia.mobile.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -41,7 +45,10 @@ class ReaderScreen(private val a: MainActivity, bookId: String) : Screen() {
     private val bar = FrameLayout(a)
     private val ticker = Handler(Looper.getMainLooper())
     private var web: WebView? = null
-    private var pdf: PdfScroll? = null
+    private var pdf: PdfView? = null
+    private val selBar = FrameLayout(a)
+    private var lastColor = HL_COLORS[0]
+    private var webSel = ""
     private var tb: TextBook? = null
     private var toc: List<TocItem> = emptyList()
     private var pct = book?.pct ?: 0.0
@@ -69,16 +76,38 @@ class ReaderScreen(private val a: MainActivity, bookId: String) : Screen() {
         root.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
 
         // glass toolbar: translucent tint, soft sheen and a hairline edge, floating above the page
+        fun sep() = View(a).apply { setBackgroundColor(if (Store.dark) 0x33FFFFFF else 0x22000000) }
         val pill = a.hbox {
-            background = a.glass(32f); elevation = a.dpf(10f); setPadding(a.dp(10), a.dp(6), a.dp(10), a.dp(6))
-            put(a.iconBtn(R.drawable.ic_pen, L("Highlight", "Surligner"), 0xFFF2B33D.toInt(), 22) { highlight() }, a.dp(48), a.dp(48), 0f, 0, 0, 4, 0)
-            put(View(a).apply { setBackgroundColor(if (Store.dark) 0x33FFFFFF else 0x22000000) }, 1, a.dp(24), 0f, 0, 0, 4, 0)
-            put(a.iconBtn(R.drawable.ic_bookmark, L("Bookmark", "Marque-page"), Th.ink, 22) { bookmark() }, a.dp(48), a.dp(48), 0f, 0, 0, 4, 0)
-            put(View(a).apply { setBackgroundColor(if (Store.dark) 0x33FFFFFF else 0x22000000) }, 1, a.dp(24), 0f, 0, 0, 4, 0)
-            put(a.iconBtn(R.drawable.ic_bullets, L("Contents, bookmarks and highlights", "Sommaire, marque-pages et surlignages"), Th.ink, 22) { panel(0) }, a.dp(48), a.dp(48))
+            background = a.glass(32f); elevation = a.dpf(10f); setPadding(a.dp(8), a.dp(6), a.dp(8), a.dp(6))
+            put(a.iconBtn(R.drawable.ic_minus, L("Zoom out", "Réduire"), Th.ink, 22) { zoom(-1) }, a.dp(44), a.dp(44), 0f, 0, 0, 2, 0)
+            put(a.iconBtn(R.drawable.ic_add, L("Zoom in", "Agrandir"), Th.ink, 22) { zoom(1) }, a.dp(44), a.dp(44), 0f, 0, 0, 4, 0)
+            put(sep(), 1, a.dp(24), 0f, 0, 0, 4, 0)
+            put(a.iconBtn(R.drawable.ic_pen, L("Highlight", "Surligner"), lastColor, 22) { highlight(lastColor) }, a.dp(44), a.dp(44), 0f, 0, 0, 2, 0)
+            put(a.iconBtn(R.drawable.ic_bookmark, L("Bookmark", "Marque-page"), Th.ink, 22) { bookmark() }, a.dp(44), a.dp(44), 0f, 0, 0, 4, 0)
+            put(sep(), 1, a.dp(24), 0f, 0, 0, 4, 0)
+            put(a.iconBtn(R.drawable.ic_bullets, L("Contents, bookmarks and highlights", "Sommaire, marque-pages et surlignages"), Th.ink, 22) { panel(0) }, a.dp(44), a.dp(44))
         }
         bar.addView(pill, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.CENTER))
         root.addView(bar, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also { it.bottomMargin = a.dp(24) })
+
+        // selection bar: appears while text is selected (long-press in a PDF, or select text in an ebook)
+        val sel = a.hbox {
+            background = a.glass(32f); elevation = a.dpf(10f); setPadding(a.dp(14), a.dp(6), a.dp(6), a.dp(6))
+            for (c in HL_COLORS) put(View(a).apply {
+                background = android.graphics.drawable.GradientDrawable().apply { shape = android.graphics.drawable.GradientDrawable.OVAL; setColor(c); setStroke(a.dp(1), 0x66000000) }
+                isClickable = true; contentDescription = L("Highlight in this colour", "Surligner dans cette couleur")
+                setOnClickListener { lastColor = c; highlight(c) }
+            }, a.dp(30), a.dp(30), 0f, 0, 0, 10, 0)
+            put(a.iconBtn(R.drawable.ic_copy, L("Copy", "Copier"), Th.ink, 20) { copySelection() })
+            if (b?.kind == "pdf") put(a.text(L("All", "Tout"), 14f, Th.accent, true).apply {
+                setPadding(a.dp(10), a.dp(10), a.dp(10), a.dp(10)); isClickable = true
+                contentDescription = L("Select the whole page", "Sélectionner toute la page"); setOnClickListener { pdf?.selectAllOnPage() }
+            }, WRAP, WRAP)
+            put(a.iconBtn(R.drawable.ic_close, L("Clear selection", "Annuler la sélection"), Th.sub, 18) { clearSelection() })
+        }
+        selBar.addView(sel, FrameLayout.LayoutParams(WRAP, WRAP))
+        selBar.visibility = View.GONE
+        root.addView(selBar, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).also { it.bottomMargin = a.dp(92) })
         updateStats()
         if (b == null) message(L("This book is no longer in the library.", "Ce livre n’est plus dans la bibliothèque."), false) else open(b)
     }
@@ -113,8 +142,10 @@ class ReaderScreen(private val a: MainActivity, bookId: String) : Screen() {
         val file = Store.bookFile(b)
         content.addView(android.widget.ProgressBar(a).apply { isIndeterminate = true }, FrameLayout.LayoutParams(a.dp(32), a.dp(32), Gravity.CENTER))
         if (b.kind == "pdf") {
-            val p = PdfScroll(a, file, pct, { f -> progress(f) }, { n -> if (b.total != n) { b.total = n; Store.saveLib() }; loaded = true; updateStats() },
-                { message(L("This PDF could not be opened. It may be damaged or password-protected.", "Ce PDF n’a pas pu être ouvert. Il est peut-être endommagé ou protégé par mot de passe."), true) })
+            val p = PdfView(a, file, pct, { f -> progress(f) }, { n -> if (b.total != n) { b.total = n; Store.saveLib() }; loaded = true; updateStats() },
+                { message(L("This PDF could not be opened. It may be damaged or password-protected.", "Ce PDF n’a pas pu être ouvert. Il est peut-être endommagé ou protégé par mot de passe."), true) },
+                { on -> selBar.visibility = if (on) View.VISIBLE else View.GONE })
+            p.setHighlights(b.hl)
             pdf = p
             // PdfScroll must be attached to get a width before it starts loading
             content.removeAllViews(); content.addView(p, FrameLayout.LayoutParams(MATCH, MATCH))
@@ -137,11 +168,13 @@ class ReaderScreen(private val a: MainActivity, bookId: String) : Screen() {
         @JavascriptInterface fun loaded() { a.post(Runnable {
             this@ReaderScreen.loaded = true
             for (i in content.childCount - 1 downTo 0) if (content.getChildAt(i) is android.widget.ProgressBar) content.removeViewAt(i)
-            val hl = JSONArray(); book?.hl?.forEach { m -> m.text?.let { hl.put(it) } }
+            val hl = JSONArray(); book?.hl?.forEach { m -> m.text?.let { hl.put(JSONObject().put("t", it).put("c", hex(m.color))) } }
             web?.evaluateJavascript("applyHl($hl)", null)
         }) }
         @JavascriptInterface fun progress(p: Double) { a.post(Runnable { this@ReaderScreen.progress(p) }) }
-        @JavascriptInterface fun highlight(text: String) { a.post(Runnable { addHighlight(text) }) }
+        @JavascriptInterface fun highlight(text: String, color: String) { a.post(Runnable { addHighlight(text, try { Color.parseColor(color) } catch (e: Exception) { 0 }) }) }
+        @JavascriptInterface fun sel(text: String) { a.post(Runnable { webSel = text; selBar.visibility = if (text.isNotBlank()) View.VISIBLE else View.GONE }) }
+        @JavascriptInterface fun zoom(z: Double) { a.post(Runnable { Store.textZoom = z.toFloat().coerceIn(0.6f, 3f); Store.saveState() }) }
         @JavascriptInterface fun link(url: String) { a.post(Runnable { try { a.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) } catch (e: Exception) {} }) }
         @JavascriptInterface fun error() { a.post(Runnable { message(errorText("invalid"), true) }) }
     }
@@ -154,7 +187,7 @@ class ReaderScreen(private val a: MainActivity, bookId: String) : Screen() {
         w.settings.apply { javaScriptEnabled = true; allowFileAccess = false; allowContentAccess = false; setSupportZoom(false); blockNetworkLoads = false; mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW }
         w.addJavascriptInterface(Bridge(), "Notia")
         val html = Pages.load(a, "reader.html", mapOf("%NONCE%" to page, "%BG%" to cssColor(Th.bg), "%INK%" to cssColor(Th.ink), "%SUB%" to cssColor(Th.sub),
-            "%ACCENT%" to cssColor(Th.accent), "%HL%" to "#FFE08A", "%LOADING%" to L("Opening…", "Ouverture…"))).toByteArray(Charsets.UTF_8)
+            "%ACCENT%" to cssColor(Th.accent), "%HL%" to "#FFE08A", "%ZOOM%" to Store.textZoom.toString(), "%COMIC%" to t.comic.toString(), "%LOADING%" to L("Opening…", "Ouverture…"))).toByteArray(Charsets.UTF_8)
         w.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest) = true
             override fun shouldInterceptRequest(v: WebView, r: WebResourceRequest): WebResourceResponse? {
@@ -179,14 +212,41 @@ class ReaderScreen(private val a: MainActivity, bookId: String) : Screen() {
 
     private fun jump(p: Double) { pdf?.jump(p); web?.evaluateJavascript("jump($p)", null) }
 
-    private fun addHighlight(text: String) {
+    private fun hex(c: Int) = String.format("#%06X", (if (c != 0) c else HL_COLORS[0]) and 0xFFFFFF)
+
+    private fun addHighlight(text: String, color: Int) {
         val b = book ?: return
-        b.hl.add(Mark(newId(), pct, 0, text)); Store.saveLib(); a.toast(L("Highlight saved.", "Surlignage enregistré."))
+        b.hl.add(Mark(newId(), pct, 0, text, color)); Store.saveLib(); a.toast(L("Highlight saved.", "Surlignage enregistré."))
     }
 
-    private fun highlight() {
-        if (book?.kind == "pdf") { a.toast(L("Highlighting is not available in PDFs. Use bookmarks instead.", "Le surlignage n’est pas disponible dans les PDF. Utilisez les marque-pages.")); return }
-        web?.evaluateJavascript("hl()") { v -> if (v != "true") a.toast(L("Select some text first, then tap Highlight.", "Sélectionnez d’abord du texte, puis touchez Surligner.")) }
+    /** Highlights the current selection in [color] (PDF: from the long-press selection, ebooks: from the text selection). */
+    private fun highlight(color: Int) {
+        val b = book ?: return
+        val p = pdf
+        if (p != null) {
+            if (!p.hasSelection()) { a.toast(L("Long-press a word, drag the handles, then pick a colour.", "Appuyez longuement sur un mot, déplacez les poignées, puis choisissez une couleur.")); return }
+            val m = p.highlightSelection(color) ?: return
+            b.hl.add(m); Store.saveLib(); p.setHighlights(b.hl); a.toast(L("Highlight saved.", "Surlignage enregistré."))
+            return
+        }
+        web?.evaluateJavascript("hl('${hex(color)}')") { v -> if (v != "true") a.toast(L("Select some text first, then pick a colour.", "Sélectionnez d’abord du texte, puis choisissez une couleur.")) }
+    }
+
+    private fun copySelection() {
+        val t = pdf?.selectedText() ?: webSel
+        if (t.isBlank()) return
+        (a.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Notia", t))
+        a.toast(L("Copied.", "Copié."))
+    }
+
+    private fun clearSelection() {
+        pdf?.clearSelection(); web?.evaluateJavascript("clearSel()", null); webSel = ""; selBar.visibility = View.GONE
+    }
+
+    /** +1 = bigger, -1 = smaller. PDFs scale the page (always sharp); ebooks scale the text and reflow it. */
+    private fun zoom(dir: Int) {
+        val p = pdf
+        if (p != null) p.zoomBy(if (dir > 0) 1.25f else 1f / 1.25f) else web?.evaluateJavascript("zoomBy($dir)", null)
     }
 
     private fun bookmark() {
@@ -243,7 +303,7 @@ class ReaderScreen(private val a: MainActivity, bookId: String) : Screen() {
                 1 -> { if (b.bm.isEmpty()) hint(L("No bookmarks yet. Tap the bookmark button while reading.", "Aucun marque-page. Touchez le bouton marque-page pendant la lecture."))
                     b.bm.forEach { m -> row(pageOf(m), "${Math.round(m.pct * 100)}%", 0, { jump(m.pct) }, { b.bm.remove(m); Store.saveLib(); render(1) }) } }
                 else -> { if (b.hl.isEmpty()) hint(L("No highlights yet. Select text, then tap the pen.", "Aucun surlignage. Sélectionnez du texte puis touchez le stylo."))
-                    b.hl.forEach { m -> row(m.text ?: "", pageOf(m), 0, { jump(m.pct) }, { b.hl.remove(m); Store.saveLib(); render(2) }) } }
+                    b.hl.forEach { m -> row(m.text ?: "", pageOf(m), 0, { jump(m.pct) }, { b.hl.remove(m); Store.saveLib(); pdf?.setHighlights(b.hl); render(2) }) } }
             }
         }
         render(tab)

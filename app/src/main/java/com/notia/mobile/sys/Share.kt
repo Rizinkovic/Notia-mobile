@@ -115,7 +115,7 @@ object Exporter {
 object Library {
     const val MAX_BOOKS = 10
     private const val MAX_BYTES = 60L * 1024 * 1024
-    val EXT = setOf("pdf", "epub", "mobi", "azw", "azw3", "prc", "docx", "txt", "html", "htm")
+    val EXT = setOf("pdf", "epub", "mobi", "azw", "azw3", "prc", "docx", "cbz", "txt", "html", "htm")
 
     class Fail(val code: String) : Exception(code)
 
@@ -124,6 +124,7 @@ object Library {
         ext == "epub" || mime == "application/epub+zip" -> "epub"
         ext in setOf("mobi", "azw", "azw3", "prc") || mime.contains("mobipocket") -> "mobi"
         ext == "docx" || mime.contains("wordprocessingml") -> "docx"
+        ext == "cbz" || mime == "application/vnd.comicbook+zip" || mime == "application/x-cbz" -> "cbz"
         ext == "txt" || mime == "text/plain" -> "txt"
         ext == "html" || ext == "htm" || mime == "text/html" -> "html"
         else -> null
@@ -168,7 +169,7 @@ object Library {
             val head = f.inputStream().use { it.readNBytesCompat(1100) }
             val ok = when (kind) {
                 "pdf" -> String(head, Charsets.ISO_8859_1).contains("%PDF")
-                "epub", "docx" -> head.size > 4 && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()
+                "epub", "docx", "cbz" -> head.size > 4 && head[0] == 'P'.code.toByte() && head[1] == 'K'.code.toByte()
                 "mobi" -> head.size > 68 && String(head, 60, 8, Charsets.ISO_8859_1).let { it == "BOOKMOBI" || it == "TEXtREAd" }
                 else -> true
             }
@@ -202,7 +203,7 @@ object Library {
                         }
                     } finally { r.close() }
                 }
-            } else if (b.kind == "epub" || b.kind == "mobi") {
+            } else if (b.kind == "epub" || b.kind == "mobi" || b.kind == "cbz") {
                 openTextBook(b.kind, f).use { tb -> tb.cover()?.let { bytes -> decodeScaled(bytes, 300)?.let { saveCover(b, it) } } }
             }
         } catch (e: BookException) {

@@ -26,19 +26,24 @@ object Reminders {
     const val ACT_READ = "com.notia.mobile.READING"
     const val ACT_DONE = "com.notia.mobile.TASK_DONE"
     const val ACT_SNOOZE = "com.notia.mobile.TASK_SNOOZE"
-    const val CH_NOTE = "daily_note"
     const val CH_IDLE = "come_back"
-    const val ACT_MORNING = "com.notia.mobile.MORNING"
     const val ACT_IDLE = "com.notia.mobile.IDLE"
-    /** Extra on the notification tap intent: open a blank note straight away. */
-    const val EXTRA_NEW_NOTE = "com.notia.mobile.NEW_NOTE"
+    /** Ring time of a task alarm before the notification withdraws itself (the task then shows as overdue). */
+    private const val RING_MS = 3 * 60_000L
     private const val READ_HOUR = 19
     private const val IDLE_HOUR = 18
     private const val DAY = 86_400_000L
     /** Days away after which Notia nudges the user (then stops, so it never nags forever). */
     private val IDLE_STEPS = intArrayOf(3, 7, 14, 30)
 
+    /** The morning writing reminder was removed: cancel its alarm (and channel) on installs that still have it. */
+    private fun dropMorning(ctx: Context) {
+        try { ctx.getSystemService(AlarmManager::class.java).cancel(pi(ctx, "com.notia.mobile.MORNING", "daily")) } catch (e: Exception) {}
+        if (Build.VERSION.SDK_INT >= 26) try { ctx.getSystemService(NotificationManager::class.java).deleteNotificationChannel("daily_note") } catch (e: Exception) {}
+    }
+
     fun channels(ctx: Context) {
+        dropMorning(ctx)
         if (Build.VERSION.SDK_INT < 26) return
         val nm = ctx.getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CH_TASKS, if (Store.lang == "fr") "Alarmes de tâches" else "Task alarms", NotificationManager.IMPORTANCE_HIGH).apply {
@@ -49,18 +54,11 @@ object Reminders {
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         })
         nm.createNotificationChannel(NotificationChannel(CH_READ, if (Store.lang == "fr") "Rappels de lecture" else "Reading reminders", NotificationManager.IMPORTANCE_DEFAULT))
-        nm.createNotificationChannel(NotificationChannel(CH_NOTE, if (Store.lang == "fr") "Rappel d’écriture du matin" else "Morning writing reminder", NotificationManager.IMPORTANCE_DEFAULT))
         nm.createNotificationChannel(NotificationChannel(CH_IDLE, if (Store.lang == "fr") "On se retrouve ?" else "Come-back reminders", NotificationManager.IMPORTANCE_LOW))
     }
 
     fun hasPermission(ctx: Context) = Build.VERSION.SDK_INT < 33 || ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
     fun enabled(ctx: Context) = ctx.getSystemService(NotificationManager::class.java).areNotificationsEnabled()
-
-    fun canExact(ctx: Context): Boolean = Build.VERSION.SDK_INT < 31 || ctx.getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
-
-    fun openExactSettings(a: Activity) {
-        try { if (Build.VERSION.SDK_INT >= 31) a.startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:" + a.packageName))) } catch (e: Exception) {}
-    }
 
     fun openNotificationSettings(a: Activity) {
         try { a.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, a.packageName)) } catch (e: Exception) {}
@@ -71,12 +69,18 @@ object Reminders {
         return PendingIntent.getBroadcast(ctx, key.hashCode(), i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 
-    /** Returns true when the alarm will fire at the exact time. */
+    /**
+     * Task alarm. Uses AlarmManager.setAlarmClock: it fires at the exact minute even in Doze and needs no
+     * "Alarms & reminders" permission (plain inexact alarms can be delayed by many minutes on a sleeping phone).
+     * Returns true when it was scheduled as an alarm clock.
+     */
     fun schedule(ctx: Context, id: String, due: Long): Boolean {
         val am = ctx.getSystemService(AlarmManager::class.java)
         val p = pi(ctx, ACT_TASK, id) { putExtra("id", id) }
-        return if (canExact(ctx)) { am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, due, p); true }
-        else { am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, due, p); false }
+        val showApp = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        return try { am.setAlarmClock(AlarmManager.AlarmClockInfo(due, showApp), p); true }
+        catch (e: SecurityException) { am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, due, p); false }
     }
 
     fun cancel(ctx: Context, id: String) { ctx.getSystemService(AlarmManager::class.java).cancel(pi(ctx, ACT_TASK, id) { putExtra("id", id) }) }
@@ -93,20 +97,6 @@ object Reminders {
         am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, c.timeInMillis, p)
     }
 
-    private fun nextAt(hour: Int, minute: Int): Long {
-        val c = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, hour); set(Calendar.MINUTE, minute); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
-        if (c.timeInMillis <= System.currentTimeMillis() + 60_000) c.add(Calendar.DAY_OF_YEAR, 1)
-        return c.timeInMillis
-    }
-
-    /** Every morning: "got an idea? write it down". */
-    fun scheduleMorning(ctx: Context) {
-        val am = ctx.getSystemService(AlarmManager::class.java)
-        val p = pi(ctx, ACT_MORNING, "daily")
-        if (!Store.remMorning) { am.cancel(p); return }
-        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, nextAt(Store.morningHour, Store.morningMin), p)
-    }
-
     /** Whole days since the app was last used, rounded so an alarm that fires a little early still counts. */
     private fun daysAway(): Int = if (Store.lastOpen <= 0L) 0 else Math.round((System.currentTimeMillis() - Store.lastOpen) / DAY.toDouble()).toInt()
 
@@ -120,7 +110,7 @@ object Reminders {
         am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, Math.max(c.timeInMillis, System.currentTimeMillis() + 60_000), p)
     }
 
-    fun scheduleAll(ctx: Context) { scheduleReading(ctx); scheduleMorning(ctx); scheduleIdle(ctx) }
+    fun scheduleAll(ctx: Context) { scheduleReading(ctx); scheduleIdle(ctx) }
 
     fun rescheduleAll(ctx: Context) {
         val now = System.currentTimeMillis()
@@ -140,25 +130,30 @@ object Reminders {
         return Notification.Action.Builder(android.graphics.drawable.Icon.createWithResource(ctx, icon), label, p).build()
     }
 
-    /** Task alarm: rings, vibrates and offers Done and Snooze 10 min. */
+    /** Task alarm: rings (looping) and vibrates until you act on it, with Done and Snooze 10 min. */
     fun showTask(ctx: Context, taskId: String, title: String) {
         val fr = Store.lang == "fr"
-        show(ctx, CH_TASKS, taskId.hashCode(), if (fr) "Tâche à terminer" else "Time to finish your task", title, false) { b ->
-            b.setCategory(Notification.CATEGORY_REMINDER)
+        show(ctx, CH_TASKS, taskId.hashCode(), if (fr) "⏰ Heure de votre tâche" else "⏰ Time for your task", title, insistent = true) { b ->
+            b.setCategory(Notification.CATEGORY_ALARM).setVisibility(Notification.VISIBILITY_PUBLIC)
+            if (Build.VERSION.SDK_INT >= 26) b.setTimeoutAfter(RING_MS)
             b.addAction(action(ctx, ACT_DONE, taskId, if (fr) "Terminé" else "Done", R.drawable.ic_check))
             b.addAction(action(ctx, ACT_SNOOZE, taskId, if (fr) "Reporter 10 min" else "Snooze 10 min", R.drawable.ic_clock))
         }
     }
 
-    fun show(ctx: Context, channel: String, id: Int, title: String, text: String, newNote: Boolean = false, extra: (Notification.Builder) -> Unit = {}) {
-        val tap = Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP).putExtra(EXTRA_NEW_NOTE, newNote)
-        // own request code per notification, otherwise FLAG_UPDATE_CURRENT would overwrite the extras of the others
+    fun show(ctx: Context, channel: String, id: Int, title: String, text: String, insistent: Boolean = false, extra: (Notification.Builder) -> Unit = {}) {
+        val tap = Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        // own request code per notification so they never share one PendingIntent
         val open = PendingIntent.getActivity(ctx, id, tap, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(ctx, channel) else @Suppress("DEPRECATION") Notification.Builder(ctx).setPriority(Notification.PRIORITY_HIGH).setDefaults(Notification.DEFAULT_ALL)
         b.setSmallIcon(R.drawable.ic_stat).setContentTitle(title).setContentText(text).setStyle(Notification.BigTextStyle().bigText(text))
             .setContentIntent(open).setAutoCancel(true)
         extra(b)
-        if (hasPermission(ctx)) ctx.getSystemService(NotificationManager::class.java).notify(id, b.build())
+        if (!hasPermission(ctx)) return
+        val n = b.build()
+        // keep ringing until the notification is dismissed or times out (Android 8+ only, where the timeout exists)
+        if (insistent && Build.VERSION.SDK_INT >= 26) n.flags = n.flags or Notification.FLAG_INSISTENT
+        ctx.getSystemService(NotificationManager::class.java).notify(id, n)
     }
 }
 
@@ -198,16 +193,6 @@ class ReminderReceiver : BroadcastReceiver() {
                 }
                 Reminders.scheduleReading(ctx)
             }
-            Reminders.ACT_MORNING -> {
-                // no nudge when a note was already written today
-                val now = System.currentTimeMillis()
-                if (Store.remMorning && Store.notes.none { sameDay(it.created, now) }) {
-                    val msgs = if (fr) listOf("Une idée, une pensée, une liste ? Notez-la avant qu’elle ne s’envole.", "Bonjour ! Qu’avez-vous en tête ce matin ? Écrivez-le en 10 secondes.", "Commencez la journée en écrivant trois choses importantes.", "Une nouvelle journée, une nouvelle page. Que voulez-vous retenir aujourd’hui ?", "Et si vous notiez l’idée qui vous trotte dans la tête ?")
-                               else listOf("Got an idea, a thought, a to-do? Write it down before it escapes.", "Good morning! What's on your mind? Capture it in 10 seconds.", "Start the day by writing down your three most important things.", "A fresh day, a fresh page. What do you want to remember today?", "Why not jot down that idea floating around in your head?")
-                    Reminders.show(ctx, Reminders.CH_NOTE, 7002, if (fr) "Bonjour ☀️" else "Good morning ☀️", msgs[dayOfYear() % msgs.size], true)
-                }
-                Reminders.scheduleMorning(ctx)
-            }
             Reminders.ACT_IDLE -> {
                 val away = if (Store.lastOpen <= 0L) 0 else ((System.currentTimeMillis() - Store.lastOpen) / 86_400_000L).toInt()
                 if (Store.remInactive && away >= 2) {
@@ -218,7 +203,7 @@ class ReminderReceiver : BroadcastReceiver() {
                         b != null -> if (fr) "Reprenez « ${b.title} » : ${Math.round(b.pct * 100)} % lus." else "Pick \"${b.title}\" back up: you are ${Math.round(b.pct * 100)}% through."
                         else -> if (fr) "Vos notes vous attendent. Une idée à noter ?" else "Your notes miss you. Got an idea to capture?"
                     }
-                    Reminders.show(ctx, Reminders.CH_IDLE, 7003, if (fr) "Notia vous attend" else "Notia misses you", text, false)
+                    Reminders.show(ctx, Reminders.CH_IDLE, 7003, if (fr) "Notia vous attend" else "Notia misses you", text)
                 }
                 Reminders.scheduleIdle(ctx)
             }

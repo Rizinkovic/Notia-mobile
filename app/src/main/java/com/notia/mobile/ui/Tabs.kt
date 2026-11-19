@@ -186,8 +186,6 @@ class NotesScreen(private val a: MainActivity) : Screen() {
 class SettingsScreen(private val a: MainActivity) : Screen() {
     private val root = a.vbox { setBackgroundColor(Th.bg) }
     private val notifBox = a.vbox()
-    private val dialogTheme get() = if (Store.dark) android.R.style.Theme_DeviceDefault_Dialog_Alert else android.R.style.Theme_DeviceDefault_Light_Dialog_Alert
-
     companion object {
         const val SITE = "notia.srichard.site"
         const val EMAIL = "rsongrichard@gmail.com"
@@ -221,14 +219,18 @@ class SettingsScreen(private val a: MainActivity) : Screen() {
                 put(row(R.drawable.ic_doc, L("About Notia", "À propos de Notia"), L("What Notia does", "Ce que fait Notia"), chevron()) { aboutSheet() })
                 put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
                 put(row(R.drawable.ic_lock, L("Privacy policy", "Politique de confidentialité"), L("Your data stays on this phone", "Vos données restent sur ce téléphone"), chevron()) { privacySheet() })
+            }, MATCH, WRAP, 0f, 0, 0, 0, 18)
+
+            // every way to reach the developer, in one place
+            put(cap(L("Contact", "Contact")), MATCH, WRAP, 0f, 4, 0, 0, 8)
+            put(group {
+                put(row(R.drawable.ic_pen, L("Developer", "Développeur"), "Song Richard  •  srichard.site", chevron()) { openUrl("https://srichard.site") })
                 put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
                 put(row(R.drawable.ic_link, L("Website", "Site web"), SITE, chevron()) { openUrl("https://$SITE") })
                 put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
-                put(row(R.drawable.ic_chat, L("Contact the developer", "Contacter le développeur"), EMAIL, chevron()) { mail() })
-                put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
-                put(row(R.drawable.ic_pen, L("Developer", "Développeur"), "Song Richard", chevron()) { openUrl("https://srichard.site") })
+                put(row(R.drawable.ic_chat, L("Email", "E-mail"), EMAIL, chevron()) { mail() })
             }, MATCH, WRAP, 0f, 0, 0, 0, 16)
-            put(a.text(L("Made with care by Song Richard\n© 2026 Notia. All rights reserved.", "Fait avec soin par Song Richard\n© 2026 Notia. Tous droits réservés."), 12f, Th.sub).apply { gravity = Gravity.CENTER; setLineSpacing(0f, 1.25f) }, MATCH, WRAP, 0f, 0, 4, 0, 0)
+            put(a.text(L("© 2026 Notia. All rights reserved.", "© 2026 Notia. Tous droits réservés."), 12f, Th.sub).apply { gravity = Gravity.CENTER }, MATCH, WRAP, 0f, 0, 4, 0, 0)
         }
         root.put(sv, MATCH, 0, 1f)
         drawNotifs()
@@ -263,8 +265,6 @@ class SettingsScreen(private val a: MainActivity) : Screen() {
         if (trailing != null) put(trailing, WRAP, WRAP, 0f, 10, 0, 0, 0)
     }
 
-    private fun hhmm(h: Int, m: Int) = String.format("%02d:%02d", h, m)
-
     // ---------- reminders ----------
     private fun drawNotifs() {
         notifBox.removeAllViews()
@@ -279,35 +279,12 @@ class SettingsScreen(private val a: MainActivity) : Screen() {
             }, MATCH, WRAP, 0f, 0, 0, 0, 10)
         }
         notifBox.put(group {
-            put(row(R.drawable.ic_pen, L("Morning writing reminder", "Rappel d’écriture du matin"),
-                if (Store.remMorning) L("Every day at ${hhmm(Store.morningHour, Store.morningMin)}: write a note or an idea", "Chaque jour à ${hhmm(Store.morningHour, Store.morningMin)} : écrivez une note ou une idée") else L("Off", "Désactivé"),
-                sw(Store.remMorning) { c -> Store.remMorning = c; Store.saveState(); Reminders.scheduleMorning(a); if (c) Reminders.ask(a) { drawNotifs() } else drawNotifs() }, null))
-            if (Store.remMorning) {
-                put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
-                put(row(R.drawable.ic_clock, L("Reminder time", "Heure du rappel"), null, a.text(hhmm(Store.morningHour, Store.morningMin), 16f, Th.accent, true)) { pickTime() })
-            }
-            put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
             put(row(R.drawable.ic_wifi, L("Come-back reminder", "Rappel de retour"), L("A gentle nudge after 3, 7, 14 and 30 days without opening Notia", "Un petit rappel après 3, 7, 14 et 30 jours sans ouvrir Notia"),
                 sw(Store.remInactive) { c -> Store.remInactive = c; Store.saveState(); Reminders.scheduleIdle(a); if (c) Reminders.ask(a) { drawNotifs() } else drawNotifs() }, null))
             put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
             put(row(R.drawable.ic_book, L("Finish your book", "Terminez votre livre"), L("Evening reminder (19:00) for the book you are reading", "Rappel le soir (19:00) pour le livre en cours"),
                 sw(Store.remBooks) { c -> Store.remBooks = c; Store.saveState(); Reminders.scheduleReading(a); if (c) Reminders.ask(a) { drawNotifs() } else drawNotifs() }, null))
-            put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
-            put(row(R.drawable.ic_check_circle, L("Send a test notification", "Envoyer une notification test"), null, chevron()) { testNotif() })
         })
-    }
-
-    private fun pickTime() {
-        android.app.TimePickerDialog(a, dialogTheme, { _, h, m ->
-            Store.morningHour = h; Store.morningMin = m; Store.saveState(); Reminders.scheduleMorning(a); drawNotifs()
-        }, Store.morningHour, Store.morningMin, true).show()
-    }
-
-    private fun testNotif() {
-        Reminders.ask(a) { ok ->
-            if (!ok) { a.toast(L("Allow notifications for Notia first.", "Autorisez d’abord les notifications pour Notia.")); drawNotifs(); return@ask }
-            Reminders.show(a, Reminders.CH_NOTE, 7100, "Notia", L("This is how your reminders will look. Tap to write a note.", "Voici l’aspect de vos rappels. Touchez pour écrire une note."), true)
-        }
     }
 
     // ---------- about ----------
@@ -344,7 +321,6 @@ class SettingsScreen(private val a: MainActivity) : Screen() {
             "Gardez vos mots de passe chiffrés par un code ou un mot de passe que vous seul connaissez."),
         L("Wi-Fi transfer", "Transfert Wi-Fi") to L("Send notes between your devices on the same Wi-Fi, or sync from Notia Desktop with a QR code.",
             "Envoyez des notes entre vos appareils sur le même Wi-Fi, ou synchronisez depuis Notia Desktop avec un QR code."),
-        L("Made by", "Créé par") to "Song Richard\n$SITE\n$EMAIL",
     ))
 
     private fun privacySheet() = docSheet(L("Privacy policy", "Politique de confidentialité"), listOf(

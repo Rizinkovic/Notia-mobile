@@ -19,7 +19,8 @@ class Note(val id: String, var title: String, html: String, var cat: String?, va
 
 class Cat(val id: String, var name: String, val color: String)
 class Task(val id: String, var title: String, var due: Long?, var done: Boolean, var armed: Boolean = false)
-class Mark(val id: String, val pct: Double, val page: Int, val text: String?)
+/** A bookmark or highlight. [color] is an ARGB int (0 = default yellow); [rects] holds a PDF highlight as "l,t,r,b;..." fractions of the page. */
+class Mark(val id: String, val pct: Double, val page: Int, val text: String?, val color: Int = 0, val rects: String? = null)
 class Book(
     val id: String, var title: String, val kind: String, val file: String,
     var pct: Double = 0.0, var page: Int = 0, var total: Int = 0, var time: Long = 0, var last: Long = 0,
@@ -39,11 +40,9 @@ object Store {
     var dark = true
     var purged = 0
     // ---- user preferences (saved in state.json) ----
-    var remMorning = true        // daily "write a note / idea" reminder
-    var morningHour = 8
-    var morningMin = 0
     var remInactive = true       // "come back" nudges after days away
     var remBooks = true          // evening "finish your book" reminder
+    var textZoom = 1.0f          // ebook reader text size factor (pinch or +/- buttons), 1.0 = default
     var toolsAll = false         // editor toolbar: false = basics only, true = every tool
     var notifAsked = false       // the first-launch notification prompt was shown
     var lastOpen = 0L            // when the app was last used (drives the "come back" nudges)
@@ -79,9 +78,8 @@ object Store {
     private fun readAll() {
         (readJson(File(dir, "state.json")) as? JSONObject)?.let { s ->
             lang = s.optString("lang", lang); dark = s.optBoolean("dark", true)
-            remMorning = s.optBoolean("remMorning", true); morningHour = s.optInt("morningHour", 8).coerceIn(0, 23); morningMin = s.optInt("morningMin", 0).coerceIn(0, 59)
             remInactive = s.optBoolean("remInactive", true); remBooks = s.optBoolean("remBooks", true)
-            toolsAll = s.optBoolean("toolsAll", false); notifAsked = s.optBoolean("notifAsked", false); lastOpen = s.optLong("lastOpen", 0L)
+            textZoom = s.optDouble("textZoom", 1.0).toFloat().coerceIn(0.6f, 3.0f); toolsAll = s.optBoolean("toolsAll", false); notifAsked = s.optBoolean("notifAsked", false); lastOpen = s.optLong("lastOpen", 0L)
             s.optJSONArray("cats")?.let { a -> for (i in 0 until a.length()) a.getJSONObject(i).let { cats.add(Cat(it.getString("id"), it.getString("name"), it.optString("color", CAT_COLORS[0]))) } }
         }
         File(dir, "notes").listFiles()?.forEach { f ->
@@ -103,7 +101,7 @@ object Store {
 
     private fun marks(a: JSONArray?): MutableList<Mark> {
         val l = ArrayList<Mark>()
-        if (a != null) for (i in 0 until a.length()) a.optJSONObject(i)?.let { l.add(Mark(it.optString("id", newId()), it.optDouble("pct", 0.0), it.optInt("page"), it.optString("text").ifEmpty { null })) }
+        if (a != null) for (i in 0 until a.length()) a.optJSONObject(i)?.let { l.add(Mark(it.optString("id", newId()), it.optDouble("pct", 0.0), it.optInt("page"), it.optString("text").ifEmpty { null }, it.optInt("color", 0), it.optString("rects").ifEmpty { null })) }
         return l
     }
 
@@ -161,7 +159,7 @@ object Store {
     fun saveLib() = mark("lib")
     fun saveNote(n: Note) = mark("n:" + n.id)
 
-    private fun marksJson(l: List<Mark>) = JSONArray().also { a -> l.forEach { m -> a.put(JSONObject().put("id", m.id).put("pct", m.pct).put("page", m.page).put("text", m.text ?: "")) } }
+    private fun marksJson(l: List<Mark>) = JSONArray().also { a -> l.forEach { m -> a.put(JSONObject().put("id", m.id).put("pct", m.pct).put("page", m.page).put("text", m.text ?: "").put("color", m.color).put("rects", m.rects ?: "")) } }
 
     /** Serialises dirty data now and writes it on the worker thread. Call from onPause. */
     fun flush() {
@@ -169,7 +167,7 @@ object Store {
         val jobs = ArrayList<Pair<File, String>>(); val dels = ArrayList<File>()
         for (k in dirty) when {
             k == "state" -> jobs.add(File(dir, "state.json") to JSONObject().put("lang", lang).put("dark", dark)
-                .put("remMorning", remMorning).put("morningHour", morningHour).put("morningMin", morningMin).put("remInactive", remInactive).put("remBooks", remBooks)
+                .put("remInactive", remInactive).put("remBooks", remBooks).put("textZoom", textZoom.toDouble())
                 .put("toolsAll", toolsAll).put("notifAsked", notifAsked).put("lastOpen", lastOpen)
                 .put("cats", JSONArray().also { a -> cats.forEach { a.put(JSONObject().put("id", it.id).put("name", it.name).put("color", it.color)) } }).toString())
             k == "tasks" -> jobs.add(File(dir, "tasks.json") to JSONArray().also { a -> tasks.forEach { a.put(JSONObject().put("id", it.id).put("title", it.title).put("due", it.due ?: JSONObject.NULL).put("done", it.done).put("armed", it.armed)) } }.toString())

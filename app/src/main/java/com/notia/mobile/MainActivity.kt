@@ -56,7 +56,6 @@ class MainActivity : Activity(), MainActivityLike {
     private var pickCb: ((Uri?) -> Unit)? = null
     private var permCb: ((Boolean) -> Unit)? = null
     private var pendingBook: Uri? = null
-    private var pendingNewNote = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,13 +64,12 @@ class MainActivity : Activity(), MainActivityLike {
         setContentView(root)
         applyBars()
         pendingBook = bookUriOf(intent)
-        pendingNewNote = intent?.getBooleanExtra(Reminders.EXTRA_NEW_NOTE, false) == true
         showLoading()
         val t0 = System.currentTimeMillis()
         Thread {
             Store.ensureLoaded(applicationContext)
             val wait = Math.max(0L, 700 - (System.currentTimeMillis() - t0))
-            ui.postDelayed({ if (!isFinishing) { applyBars(); start(0); openPending(); openNewNote(); offerNotifications() } }, wait)
+            ui.postDelayed({ if (!isFinishing) { applyBars(); start(0); openPending(); offerNotifications() } }, wait)
         }.start()
     }
 
@@ -109,16 +107,7 @@ class MainActivity : Activity(), MainActivityLike {
         super.onNewIntent(intent)
         setIntent(intent)
         pendingBook = bookUriOf(intent)
-        pendingNewNote = intent.getBooleanExtra(Reminders.EXTRA_NEW_NOTE, false)
-        if (tabs != null) { openPending(); openNewNote() }
-    }
-
-    /** Tapping the morning "write something" notification lands straight in a blank note. */
-    private fun openNewNote() {
-        if (!pendingNewNote) return
-        pendingNewNote = false
-        intent = Intent()
-        push(EditorScreen(this, Store.addNote(null).id))
+        if (tabs != null) openPending()
     }
 
     /** One friendly explanation before the Android 13+ permission dialog, shown a single time. */
@@ -126,8 +115,8 @@ class MainActivity : Activity(), MainActivityLike {
         if (Store.notifAsked || Reminders.hasPermission(this)) return
         Store.notifAsked = true; Store.saveState()
         val s = Sheet(this, L("Stay on track", "Restez régulier"))
-        s.body.put(text(L("Notia can remind you to write a note each morning, finish your tasks and get back to your books. You can change this any time in Settings.",
-            "Notia peut vous rappeler d’écrire une note chaque matin, de terminer vos tâches et de reprendre vos livres. Vous pouvez changer cela à tout moment dans les réglages."), 15f, Th.sub).apply { setLineSpacing(0f, 1.2f) }, MATCH, WRAP, 0f, 0, 0, 0, 16)
+        s.body.put(text(L("Notia can ring an alarm for your tasks and remind you to get back to your books. You can change this any time in Settings.",
+            "Notia peut faire sonner vos tâches comme une alarme et vous rappeler de reprendre vos livres. Vous pouvez changer cela à tout moment dans les réglages."), 15f, Th.sub).apply { setLineSpacing(0f, 1.2f) }, MATCH, WRAP, 0f, 0, 0, 0, 16)
         s.body.put(pill(L("Enable notifications", "Activer les notifications")) { s.dismiss(); requestNotifPermission { } })
         s.body.put(pill(L("Not now", "Plus tard"), false) { s.dismiss() }, MATCH, WRAP, 0f, 0, 8, 0, 0)
         s.show()

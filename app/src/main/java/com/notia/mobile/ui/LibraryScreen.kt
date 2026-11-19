@@ -26,7 +26,7 @@ import java.io.File
 import java.util.concurrent.Executors
 
 fun importError(code: String) = when (code) {
-    "unsupported" -> L("Unsupported file. Use PDF, EPUB, MOBI, DOCX, TXT or HTML.", "Fichier non pris en charge. Utilisez PDF, EPUB, MOBI, DOCX, TXT ou HTML.")
+    "unsupported" -> L("Unsupported file. Use PDF, EPUB, MOBI, CBZ, DOCX, TXT or HTML.", "Fichier non pris en charge. Utilisez PDF, EPUB, MOBI, CBZ, DOCX, TXT ou HTML.")
     "big" -> L("This file is too large (60 MB max).", "Ce fichier est trop volumineux (60 Mo max).")
     "empty" -> L("This file is empty.", "Ce fichier est vide.")
     "limit" -> L("Library is full (10 books max). Remove one first.", "Bibliothèque pleine (10 livres max). Retirez-en un d’abord.")
@@ -106,7 +106,7 @@ class LibraryScreen(private val a: MainActivity) : Screen() {
             put(a.vbox { put(a.text(L("Reading time", "Temps de lecture"), 12f, Th.sub)); put(a.text(fmtTime(total), 22f, Th.ink, true), MATCH, WRAP, 0f, 0, 4, 0, 0) }, 0, WRAP, 1f)
             put(a.vbox { put(a.text(L("Books", "Livres"), 12f, Th.sub)); put(a.text("${Store.books.size}/${Library.MAX_BOOKS}", 22f, Th.ink, true), MATCH, WRAP, 0f, 0, 4, 0, 0) }, 0, WRAP, 1f)
         })
-        empty.text = if (Store.books.isEmpty()) L("Your library is empty.\nTap + to add a PDF, EPUB, MOBI, DOCX or text file.", "Votre bibliothèque est vide.\nAppuyez sur + pour ajouter un PDF, EPUB, MOBI, DOCX ou fichier texte.") else ""
+        empty.text = if (Store.books.isEmpty()) L("Your library is empty.\nTap + to add a PDF, EPUB, MOBI, CBZ comic, DOCX or text file.", "Votre bibliothèque est vide.\nAppuyez sur + pour ajouter un PDF, EPUB, MOBI, DOCX ou fichier texte.") else ""
     }
 
     private fun remove(b: Book) {
@@ -118,7 +118,7 @@ class LibraryScreen(private val a: MainActivity) : Screen() {
     private fun addBook() {
         if (importing) return
         if (Store.books.size >= Library.MAX_BOOKS) { a.toast(L("Library is full (10 books max). Remove one first.", "Bibliothèque pleine (10 livres max). Retirez-en un d’abord.")); return }
-        a.pick(arrayOf("application/pdf", "application/epub+zip", "application/x-mobipocket-ebook", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain", "text/html", "application/octet-stream")) { uri ->
+        a.pick(arrayOf("application/pdf", "application/epub+zip", "application/x-mobipocket-ebook", "application/vnd.comicbook+zip", "application/x-cbz", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain", "text/html", "application/octet-stream")) { uri ->
             if (uri == null) return@pick
             importing = true; a.toast(L("Adding book…", "Ajout du livre…"))
             Thread {
@@ -138,105 +138,4 @@ class LibraryScreen(private val a: MainActivity) : Screen() {
         if (Store.purged > 0) { a.toast(L("${Store.purged} book(s) were missing from storage and removed.", "${Store.purged} livre(s) introuvable(s) ont été retirés.")); Store.purged = 0; Store.saveLib() }
     }
     override fun onHide() { Store.unlisten(onData) }
-}
-
-/** Scrollable PDF viewer using the built-in PdfRenderer. Pages render lazily near the viewport. */
-class PdfScroll(
-    private val a: MainActivity, private val file: File, private val start: Double,
-    private val onProgress: (Double) -> Unit, private val onReady: (Int) -> Unit, private val onError: () -> Unit,
-) : ScrollView(a) {
-    private class PageInfo(val w: Int, val h: Int)
-    private val io = Executors.newSingleThreadExecutor()
-    private var renderer: PdfRenderer? = null
-    private var pfd: ParcelFileDescriptor? = null
-    private val box = LinearLayout(a).apply { orientation = LinearLayout.VERTICAL }
-    private val views = ArrayList<ImageView>()
-    private val tops = ArrayList<Int>()
-    private val pending = HashSet<Int>()
-    private val cache = object : LruCache<Int, Bitmap>(Math.min(64L * 1024 * 1024, Runtime.getRuntime().maxMemory() / 6).toInt()) {
-        override fun sizeOf(k: Int, v: Bitmap) = v.byteCount
-    }
-    private var built = false
-    private var closed = false
-
-    init {
-        isVerticalScrollBarEnabled = true; setBackgroundColor(Th.bg)
-        addView(box, FrameLayout.LayoutParams(MATCH, WRAP))
-        addOnLayoutChangeListener { _, l, _, r, _, _, _, _, _ -> if (!built && r - l > 0) { built = true; open(r - l) } }
-    }
-
-    private fun open(viewW: Int) {
-        io.execute {
-            try {
-                val p = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-                val r = PdfRenderer(p)
-                pfd = p; renderer = r
-                val sizes = (0 until r.pageCount).map { i -> val pg = r.openPage(i); try { PageInfo(pg.width, pg.height) } finally { pg.close() } }
-                if (sizes.isEmpty()) throw java.io.IOException("empty")
-                a.post(Runnable { if (!closed) build(sizes, viewW) })
-            } catch (e: Throwable) { a.post(Runnable { if (!closed) onError() }) }
-        }
-    }
-
-    private fun build(sizes: List<PageInfo>, viewW: Int) {
-        val pad = a.dp(8); val pw = viewW - 2 * pad
-        var y = 0
-        for (s in sizes) {
-            val h = Math.max(1, (pw.toLong() * s.h / s.w).toInt())
-            val iv = ImageView(a).apply { setBackgroundColor(Color.WHITE); scaleType = ImageView.ScaleType.FIT_XY }
-            box.addView(iv, LinearLayout.LayoutParams(pw, h).also { it.setMargins(pad, pad, pad, 0) })
-            tops.add(y + pad); y += h + pad; views.add(iv)
-        }
-        box.setPadding(0, 0, 0, a.dp(140))
-        onReady(sizes.size)
-        box.addOnLayoutChangeListener(object : OnLayoutChangeListener {
-            override fun onLayoutChange(v: View, l: Int, t: Int, r: Int, b: Int, ol: Int, ot: Int, or2: Int, ob: Int) {
-                box.removeOnLayoutChangeListener(this)
-                scrollTo(0, (start.coerceIn(0.0, 1.0) * room()).toInt()); show()
-            }
-        })
-    }
-
-    private fun room() = Math.max(1, box.height - height)
-    fun fraction() = (scrollY.toDouble() / room()).coerceIn(0.0, 1.0)
-    fun jump(p: Double) { scrollTo(0, (p.coerceIn(0.0, 1.0) * room()).toInt()) }
-
-    override fun onScrollChanged(l: Int, t: Int, ol: Int, ot: Int) {
-        super.onScrollChanged(l, t, ol, ot)
-        if (views.isEmpty()) return
-        onProgress(fraction()); show()
-    }
-
-    /** Renders pages within one screen of the viewport and releases far-away ones. */
-    private fun show() {
-        val top = scrollY - height; val bottom = scrollY + 2 * height
-        for (i in views.indices) {
-            val pt = tops[i]; val pb = pt + views[i].layoutParams.height
-            if (pb < top || pt > bottom) { if (pb < top - 2 * height || pt > bottom + 2 * height) views[i].setImageDrawable(null); continue }
-            val bmp = cache.get(i)
-            if (bmp != null) { if (views[i].drawable == null) views[i].setImageBitmap(bmp) }
-            else if (pending.add(i)) render(i)
-        }
-    }
-
-    private fun render(i: Int) {
-        val w = views[i].layoutParams.width; val h = views[i].layoutParams.height
-        io.execute {
-            var bmp: Bitmap? = null
-            try {
-                val r = renderer
-                if (r != null && !closed) {
-                    val pg = r.openPage(i)
-                    try { bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { it.eraseColor(Color.WHITE); pg.render(it, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY) } } finally { pg.close() }
-                }
-            } catch (e: Throwable) { bmp = null }
-            a.post(Runnable { pending.remove(i); if (bmp != null && !closed) { cache.put(i, bmp); show() } })
-        }
-    }
-
-    fun close() {
-        closed = true
-        io.execute { try { renderer?.close(); pfd?.close() } catch (e: Exception) {} }
-        io.shutdown()
-    }
 }

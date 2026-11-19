@@ -20,7 +20,7 @@ android {
         minSdk = 24
         targetSdk = 34
         versionCode = 100 + (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1)
-        versionName = "1.0.0"
+        versionName = "1.1.0"
         resourceConfigurations += listOf("en", "fr")
     }
 
@@ -61,6 +61,8 @@ android {
 }
 
 dependencies {
-    // Only dependency: QR scanning through Google Play services (no camera permission, no bundled model).
+    // QR scanning through Google Play services (no camera permission, no bundled model).
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    // PDF text layer (selection, copy, highlights). PdfRenderer only draws pixels and cannot expose the text.
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
 }

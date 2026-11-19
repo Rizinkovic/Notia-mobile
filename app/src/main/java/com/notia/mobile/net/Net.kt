@@ -1,5 +1,8 @@
 package com.notia.mobile.net
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import com.notia.mobile.core.IncomingNote
 import com.notia.mobile.core.Note
 import com.notia.mobile.core.Store
@@ -19,7 +22,10 @@ import java.net.URL
  * Wi-Fi transfer. Protocol (shared with the desktop app):
  *   POST http://<ip>:8765/notia/v1/notes   header X-Notia-Code: <4 digits shown on the receiver>
  *   body {"v":1,"notes":[{"id","title","html","category","created","modified"}]}  ->  200 {"ok":true,"count":N}
- * QR sync: the desktop shows http://<ip>:<port>/<32 hex>/notes ; the phone GETs it and imports the JSON.
+ * Desktop QR codes (token = 32 lowercase hex characters, one per session):
+ *   http://<ip>:<port>/<token>/notes   "Sync notes to phone": the phone GETs it and imports {"v":1,"notes":[...]}
+ *   http://<ip>:<port>/<token>/inbox   "Receive notes from phone": the phone POSTs {"v":1,"notes":[...]} to it
+ *   http://<ip>:<port>/<hex>/          "Wi-Fi share" of one exported file: meant for a browser
  */
 object Net {
     const val PORT = 8765
@@ -73,8 +79,8 @@ object Net {
     }
 
     /** HTTP status, or 0 when unreachable. Blocking. */
-    fun send(t: Target, body: String): Int = try {
-        val c = URL("http://${t.host}:${t.port}/notia/v1/notes").openConnection() as HttpURLConnection
+    fun send(ctx: Context, t: Target, body: String): Int = try {
+        val c = open(ctx, URL("http://${t.host}:${t.port}/notia/v1/notes"))
         c.requestMethod = "POST"; c.connectTimeout = 8000; c.readTimeout = 10000; c.doOutput = true
         c.setRequestProperty("Content-Type", "application/json"); c.setRequestProperty("X-Notia-Code", t.code)
         c.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
@@ -89,15 +95,44 @@ object Net {
         return a == 10 || (a == 172 && b in 16..31) || (a == 192 && b == 168) || (a == 169 && b == 254) || (a == 100 && b in 64..127)
     }
 
-    /** Validates a desktop sync QR value. Returns null when it is not one. */
-    fun validSyncUrl(s: String): URL? = try {
+    /** What a scanned QR code is: "sync" (desktop gives notes), "inbox" (desktop takes notes) or "files" (desktop file share). */
+    class Link(val kind: String, val url: URL)
+
+    private val RX_SYNC = Regex("^/[a-f0-9]{32}/notes$")
+    private val RX_INBOX = Regex("^/[a-f0-9]{32}/inbox$")
+    private val RX_FILES = Regex("^/[a-f0-9]{1,32}/$")
+
+    /** Classifies a QR value or pasted link. Returns null unless it is a Notia link on a local network. */
+    fun parseLink(s: String): Link? = try {
         val u = URL(s.trim())
-        if (u.protocol == "http" && Regex("^/[a-f0-9]{32}/notes$").matches(u.path) && privateHost(u.host)) u else null
+        if (u.protocol != "http" || !privateHost(u.host)) null
+        else when {
+            RX_SYNC.matches(u.path) -> Link("sync", u)
+            RX_INBOX.matches(u.path) -> Link("inbox", u)
+            RX_FILES.matches(u.path) -> Link("files", u)
+            else -> null
+        }
     } catch (e: Exception) { null }
 
-    fun fetchSync(u: URL): List<IncomingNote> {
-        val c = u.openConnection() as HttpURLConnection
-        c.connectTimeout = 8000; c.readTimeout = 15000
+    /**
+     * The Wi-Fi (or Ethernet) network, when there is one. On a Wi-Fi without internet Android keeps mobile data as
+     * the default route, so a plain connection to 192.168.x.x would leave through the cellular network and fail.
+     */
+    @Suppress("DEPRECATION")
+    private fun lan(ctx: Context): android.net.Network? = try {
+        val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        cm.allNetworks.firstOrNull { n ->
+            val c = cm.getNetworkCapabilities(n)
+            c != null && (c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || c.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))
+        }
+    } catch (e: Exception) { null }
+
+    private fun open(ctx: Context, u: URL): HttpURLConnection = (lan(ctx)?.openConnection(u) ?: u.openConnection()) as HttpURLConnection
+
+    /** Downloads the desktop's notes. Throws IOException when the desktop cannot be reached or answers badly. */
+    fun fetchSync(ctx: Context, u: URL): List<IncomingNote> {
+        val c = open(ctx, u)
+        c.connectTimeout = 8000; c.readTimeout = 20000
         try {
             if (c.responseCode != 200) throw java.io.IOException("HTTP " + c.responseCode)
             val bos = ByteArrayOutputStream(); val buf = ByteArray(8192)
@@ -105,6 +140,18 @@ object Net {
             return clean(bos.toString("UTF-8"))
         } finally { c.disconnect() }
     }
+
+    /** Sends notes to the desktop's "Receive from phone" address. HTTP status, or 0 when unreachable. Blocking. */
+    fun postInbox(ctx: Context, u: URL, body: String): Int = try {
+        val c = open(ctx, u)
+        c.requestMethod = "POST"; c.connectTimeout = 8000; c.readTimeout = 20000; c.doOutput = true
+        val bytes = body.toByteArray(Charsets.UTF_8)
+        c.setFixedLengthStreamingMode(bytes.size)
+        c.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        c.outputStream.use { it.write(bytes) }
+        val code = c.responseCode
+        c.disconnect(); code
+    } catch (e: Exception) { 0 }
 
     /** Minimal HTTP receiver. onNotes runs on a worker thread; the caller must hop to the main thread. */
     class Server(private val code: String, private val onNotes: (List<IncomingNote>) -> Int, private val onErr: (String) -> Unit) {
