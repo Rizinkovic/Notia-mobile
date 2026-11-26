@@ -29,6 +29,9 @@ import com.notia.mobile.core.esc
 import com.notia.mobile.core.newId
 import com.notia.mobile.doc.DocxWriter
 import com.notia.mobile.doc.HtmlModel
+import com.notia.mobile.doc.ImageRun
+import com.notia.mobile.doc.Images
+import com.notia.mobile.doc.PdfAndroid
 import com.notia.mobile.doc.PdfWriter
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -72,8 +75,24 @@ object Exporter {
         }
     }
 
-    fun docxBytes(n: Note) = DocxWriter.build(n.title, HtmlModel.parse(n.html, conv))
-    fun pdfBytes(n: Note) = PdfWriter(n.title, HtmlModel.parse(n.html, conv)).build()
+    /**
+     * DOCX: pictures are shrunk to at most 1100 px and stored as JPEG (the ZIP container deflates the XML); a note with a photo
+     * stays at a few hundred KB.
+     */
+    fun docxBytes(n: Note): ByteArray {
+        val blocks = HtmlModel.mapImages(HtmlModel.parse(n.html, conv)) { im ->
+            val s = Images.forDocx(im.bytes)
+            if (s == null) im else ImageRun(s.bytes, s.ext, s.w, s.h, im.pct)
+        }
+        return DocxWriter.build(n.title, blocks)
+    }
+
+    /**
+     * PDF: real text in the built-in PDF fonts (nothing embedded), pictures downscaled to ~150 dpi JPEG. Android's own PdfDocument
+     * embeds whole system fonts and stores pictures uncompressed, which is how a few lines used to reach 6 MB.
+     * Formats the PDF writer cannot read directly (gif, webp, bmp) are decoded by Android when the picture is placed.
+     */
+    fun pdfBytes(n: Note): ByteArray = PdfWriter(n.title, HtmlModel.parse(n.html) { _, b -> b }, PdfAndroid).build()
 
     fun write(ctx: Context, name: String, bytes: ByteArray): File {
         val d = File(ctx.cacheDir, "share").apply { mkdirs() }
@@ -205,6 +224,65 @@ object Library {
         val b = ByteArray(n); var got = 0
         while (got < n) { val r = read(b, got, n - got); if (r < 0) break; got += r }
         return b.copyOf(got)
+    }
+
+    // ---- author metadata (best effort; "" when the file has none) ----
+    private fun xmlText(s: String): String = HtmlModel.dec(s.replace(Regex("<[^>]*>"), " ")).replace(Regex("\\s+"), " ").trim()
+
+    private fun zipText(z: java.util.zip.ZipFile, name: String): String? =
+        z.getEntry(name)?.let { e -> z.getInputStream(e).use { String(it.readBytes(), Charsets.UTF_8) } }
+
+    private fun creators(xml: String): String =
+        Regex("<(?:dc:)?creator\\b[^>]*>([\\s\\S]*?)</(?:dc:)?creator>", RegexOption.IGNORE_CASE).findAll(xml)
+            .map { xmlText(it.groupValues[1]) }.filter { it.isNotEmpty() }.distinct().joinToString(", ")
+
+    private fun epubAuthor(f: File): String = java.util.zip.ZipFile(f).use { z ->
+        val cont = zipText(z, "META-INF/container.xml") ?: return ""
+        val opfPath = Regex("full-path\\s*=\\s*[\"']([^\"']+)").find(cont)?.groupValues?.get(1) ?: return ""
+        creators(zipText(z, opfPath) ?: return "")
+    }
+
+    private fun docxAuthor(f: File): String = java.util.zip.ZipFile(f).use { z -> creators(zipText(z, "docProps/core.xml") ?: return "") }
+
+    private fun mobiAuthor(f: File): String {
+        val b = f.inputStream().use { it.readNBytesCompat(1 shl 20) }
+        fun u32(o: Int) = if (o >= 0 && o + 4 <= b.size) ((b[o].toInt() and 255) shl 24) or ((b[o + 1].toInt() and 255) shl 16) or ((b[o + 2].toInt() and 255) shl 8) or (b[o + 3].toInt() and 255) else -1
+        if (b.size < 100) return ""
+        val nrec = ((b[76].toInt() and 255) shl 8) or (b[77].toInt() and 255)
+        if (nrec < 1) return ""
+        val off0 = u32(78)
+        val off1 = if (nrec > 1) u32(86) else b.size
+        if (off0 < 0 || off0 >= b.size) return ""
+        val r = b.copyOfRange(off0, Math.min(if (off1 in (off0 + 1)..b.size) off1 else b.size, b.size))
+        fun v(o: Int) = if (o >= 0 && o + 4 <= r.size) ((r[o].toInt() and 255) shl 24) or ((r[o + 1].toInt() and 255) shl 16) or ((r[o + 2].toInt() and 255) shl 8) or (r[o + 3].toInt() and 255) else -1
+        if (r.size < 132 || String(r, 16, 4, Charsets.ISO_8859_1) != "MOBI" || (v(128) and 0x40) == 0) return ""
+        val ex = 16 + v(20)
+        if (ex < 0 || ex + 12 > r.size || String(r, ex, 4, Charsets.ISO_8859_1) != "EXTH") return ""
+        var q = ex + 12
+        for (i in 0 until v(ex + 8)) {
+            if (q + 8 > r.size) break
+            val ty = v(q); val ln = v(q + 4)
+            if (ln < 8) break
+            if (ty == 100 && q + ln <= r.size) return String(r, q + 8, ln - 8, Charsets.UTF_8).trim()
+            q += ln
+        }
+        return ""
+    }
+
+    private fun pdfAuthor(ctx: Context, f: File): String {
+        com.tom_roush.pdfbox.android.PDFBoxResourceLoader.init(ctx.applicationContext)
+        return com.tom_roush.pdfbox.pdmodel.PDDocument.load(f).use { it.documentInformation?.author?.trim() ?: "" }
+    }
+
+    /** The book's author from its metadata, remembered after the first lookup. Blocking: call from a worker thread. "" when unknown. */
+    fun author(ctx: Context, b: Book): String {
+        b.author?.let { return it }
+        val f = Store.bookFile(b)
+        val a = try {
+            when (b.kind) { "epub" -> epubAuthor(f); "docx" -> docxAuthor(f); "mobi" -> mobiAuthor(f); "pdf" -> pdfAuthor(ctx, f); else -> "" }
+        } catch (e: Throwable) { "" }.replace(Regex("\\s+"), " ").trim().take(200)
+        b.author = a
+        return a
     }
 
     /** Extracts page count (PDF) and cover. Best effort. */

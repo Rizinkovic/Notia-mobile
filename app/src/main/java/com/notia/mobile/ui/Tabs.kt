@@ -132,7 +132,9 @@ class NotesScreen(private val a: MainActivity) : Screen() {
 
     init {
         root.setBackgroundColor(Th.bg)
-        root.put(a.tabHeader(L("Notes", "Notes"), a.iconBtn(R.drawable.ic_swap, L("Transfer", "Transfert"), Th.ink) { a.push(TransferScreen(a)) }))
+        root.put(a.tabHeader(L("Notes", "Notes"),
+            a.iconBtn(R.drawable.ic_scan, L("Scan to PDF", "Scanner en PDF"), Th.ink) { ScanFlow.run(a) },
+            a.iconBtn(R.drawable.ic_swap, L("Transfer", "Transfert"), Th.ink) { a.push(TransferScreen(a)) }))
         val search = a.field(L("Search", "Rechercher"))
         search.addTextChangedListener(object : android.text.TextWatcher {
             override fun afterTextChanged(s: android.text.Editable?) { query = s?.toString() ?: ""; refresh() }
@@ -224,6 +226,8 @@ class SettingsScreen(private val a: MainActivity) : Screen() {
             // every way to reach the developer, in one place
             put(cap(L("Contact", "Contact")), MATCH, WRAP, 0f, 4, 0, 0, 8)
             put(group {
+                put(row(R.drawable.ic_heart, L("Support Developer", "Soutenir le développeur"), L("Help keep Notia free and improving", "Aidez Notia à rester gratuit et à s’améliorer"), chevron()) { openUrl("https://srichard.site/donate") })
+                put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
                 put(row(R.drawable.ic_pen, L("Developer", "Développeur"), "Song Richard  •  srichard.site", chevron()) { openUrl("https://srichard.site") })
                 put(divider(), MATCH, 1, 0f, 52, 0, 0, 0)
                 put(row(R.drawable.ic_link, L("Website", "Site web"), SITE, chevron()) { openUrl("https://$SITE") })

@@ -1,7 +1,7 @@
 # Notia Mobile (Android, native Kotlin)
 
 Offline notes, tasks with alarms, library, password vault and Wi-Fi transfer. Native Kotlin on plain
-Android Views: no Compose, no AndroidX, two small dependencies (Play-services QR scanner, PDFBox for reading the text of PDFs).
+Android Views: no Compose, no AndroidX, three small dependencies (Play-services QR scanner and document scanner, PDFBox for reading the text of PDFs).
 Package `com.notia.mobile`, Android 7.0+.
 
 ## Get the release APK from GitHub
@@ -57,6 +57,15 @@ The password vault cannot be migrated (the old one used a different secure store
 * PDF text selection is read by PDFBox, which adds a few MB to the APK.
 
 ## Changelog
+### 1.1.2
+* **Scan to PDF (Notes → scan icon):** the Google document scanner (automatic page detection, crop, perspective fix, filters, several pages) turns paper into one PDF, like Notes on iPhone. Share it, save it to the phone, or keep the pages as a note. Pages are stored at about 200 dpi JPEG, a few hundred KB each. Without Google Play services the app offers to build the PDF from gallery photos instead. The same scanner is in the editor's tools ("Scan pages") and inserts the pages into the current note.
+* **Exports are small:** PDF export is a new writer (built-in PDF fonts, nothing embedded; pictures downscaled to about 150 dpi JPEG; text stays selectable). A note with a few lines is about 3 KB and one with a photo a few hundred KB, instead of 6 MB or more (Android's PdfDocument embedded whole system fonts and stored pictures uncompressed). DOCX pictures are now shrunk to 1100 px JPEG too. Text outside the Latin set (Chinese, Arabic, emoji ...) is drawn as small pictures in the PDF.
+* **Picture size:** tap a picture in a note to select it and drag the round handle; tap it again (or use the resize button in the tools) for Small / Medium / Large / Full, a width slider, left / centre / right alignment and delete. The chosen size is used in PDF and DOCX exports.
+* **Justify and align:** the tools panel has align left, centre, right and justify; exports keep them (PDF and DOCX).
+* **Library details:** three dots on each book show name, file type, author (read from EPUB, MOBI/AZW, PDF and DOCX metadata) and size.
+* **Settings → Contact → Support Developer** opens https://srichard.site/donate.
+* **Transfer fixes:** the phone now understands Notia Desktop's Wi-Fi share (scan its code and the exported note or file is downloaded and imported: md / txt / html become notes, pdf / docx / epub ... go to the Library); sync addresses are matched with the desktop's real token length; a sync address that answers with a web page falls back to that file import; requests are retried on the other network route; the "Sync failed" message now says why (timeout, refused, HTTP 404, address not found).
+
 ### 1.1.1
 * **MOBI / AZW3 / CBZ files now show up:** the file picker no longer filters by MIME type (Android reports these formats under many types, or none), and "Open with Notia" now also matches the generic and Amazon types that Downloads and file managers use. Files with a missing or wrong name are recognised from their first bytes. KF8-only AZW3 files are still not readable (convert to EPUB); normal MOBI files, including MOBI/KF8 hybrids, open.
 * **Zoom is pinch only:** the +/- buttons are gone. Ebook pinch is now detected natively, so one-finger scrolling is no longer slowed by a page script.

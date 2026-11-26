@@ -68,6 +68,8 @@ class EditorScreen(private val a: MainActivity, private val id: String) : Screen
             if (n.title.isBlank() && n.html.isBlank()) { title.requestFocus(); (a.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager).showSoftInput(title, 0) }
         }) }
         @JavascriptInterface fun change(html: String, count: Int) { a.post(Runnable { onText(html, count) }) }
+        @JavascriptInterface fun image(pct: Int) { a.post(Runnable { imageSheet(pct) }) }
+        @JavascriptInterface fun noImage() { a.post(Runnable { a.toast(L("Tap a picture in the note to select it, then drag its round handle or use this button.", "Touchez une image de la note pour la sélectionner, puis faites glisser sa poignée ronde ou utilisez ce bouton.")) }) }
     }
 
     private fun onText(html: String, count: Int) {
@@ -141,6 +143,14 @@ class EditorScreen(private val a: MainActivity, private val id: String) : Screen
                 tText("A", Typeface.BOLD, true, L("Text colour", "Couleur du texte"), 0xFFE5484D.toInt()) { swatchSheet(true) },
                 highlightBtn(),
                 tText("Tx", Typeface.NORMAL, false, L("Clear formatting", "Effacer la mise en forme"), Th.sub) { js("cmd('removeFormat')") },
+            ))
+            put(cells(
+                tIcon(R.drawable.ic_align_left, L("Align left", "Aligner à gauche")) { js("cmd('justifyLeft')") },
+                tIcon(R.drawable.ic_align_center, L("Centre", "Centrer")) { js("cmd('justifyCenter')") },
+                tIcon(R.drawable.ic_align_right, L("Align right", "Aligner à droite")) { js("cmd('justifyRight')") },
+                tIcon(R.drawable.ic_justify, L("Justify", "Justifier"), Th.accent) { js("cmd('justifyFull')") },
+                tIcon(R.drawable.ic_scan, L("Scan pages", "Scanner des pages"), Th.accent) { scanIntoNote() },
+                tIcon(R.drawable.ic_resize, L("Resize picture", "Redimensionner l’image"), Th.accent) { js("imgPick()") },
             ))
             put(View(a).apply { setBackgroundColor(Th.line) }, MATCH, 1, 0f, 8, 4, 8, 4)
         }
@@ -256,6 +266,55 @@ class EditorScreen(private val a: MainActivity, private val id: String) : Screen
             Thread {
                 val data = try { imageDataUri(a, uri) } catch (e: Throwable) { null }
                 a.post(Runnable { if (data == null) a.toast(L("Could not add this image.", "Impossible d’ajouter cette image.")) else ins("<img src=\"$data\" style=\"max-width:100%;height:auto;border-radius:8px\"/><div><br></div>") })
+            }.start()
+        }
+    }
+
+    /** Size, alignment and delete for the selected picture; the page updates live while the slider moves. */
+    private fun imageSheet(start: Int) {
+        val s = Sheet(a, L("Picture size", "Taille de l’image"))
+        var pct = start.coerceIn(10, 100)
+        val label = a.text("$pct%", 16f, Th.accent, true)
+        val bar = android.widget.SeekBar(a)
+        fun setPct(p: Int, fromBar: Boolean) {
+            pct = p.coerceIn(10, 100); label.text = "$pct%"
+            if (!fromBar) bar.progress = pct - 10
+            js("imgSet($pct)")
+        }
+        bar.max = 90; bar.progress = pct - 10
+        bar.progressTintList = android.content.res.ColorStateList.valueOf(Th.accent); bar.thumbTintList = android.content.res.ColorStateList.valueOf(Th.accent)
+        bar.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: android.widget.SeekBar?, p: Int, fromUser: Boolean) { if (fromUser) setPct(p + 10, true) }
+            override fun onStartTrackingTouch(sb: android.widget.SeekBar?) {}
+            override fun onStopTrackingTouch(sb: android.widget.SeekBar?) {}
+        })
+        s.body.put(a.hbox {
+            put(a.text(L("Width", "Largeur"), 15f, Th.ink, true), 0, WRAP, 1f)
+            put(label, WRAP, WRAP)
+        }, MATCH, WRAP, 0f, 0, 0, 0, 6)
+        s.body.put(bar, MATCH, WRAP, 0f, 0, 0, 0, 10)
+        val presets = a.hbox()
+        for ((v, lbl) in listOf(25 to L("Small", "Petite"), 50 to L("Medium", "Moyenne"), 75 to L("Large", "Grande"), 100 to L("Full", "Pleine")))
+            presets.put(a.chip("$lbl", false, 0, { setPct(v, false) }), WRAP, WRAP, 0f, 0, 0, 8, 0)
+        s.body.put(a.chipScroller(presets, 0), MATCH, WRAP, 0f, 0, 0, 0, 14)
+        s.body.put(a.hbox {
+            put(a.iconBtn(R.drawable.ic_align_left, L("Align left", "Aligner à gauche"), Th.ink) { js("imgAlign('left')") })
+            put(a.iconBtn(R.drawable.ic_align_center, L("Centre", "Centrer"), Th.ink) { js("imgAlign('center')") })
+            put(a.iconBtn(R.drawable.ic_align_right, L("Align right", "Aligner à droite"), Th.ink) { js("imgAlign('right')") })
+        }, MATCH, WRAP, 0f, 0, 0, 0, 12)
+        s.body.put(a.pill(L("Delete picture", "Supprimer l’image"), false, true) { js("imgDelete()"); s.dismiss() }, MATCH, WRAP, 0f, 0, 0, 0, 8)
+        s.body.put(a.pill(L("Done", "Terminé")) { s.dismiss() })
+        s.show()
+    }
+
+    /** Scans pages (or takes gallery photos when the scanner is unavailable) and puts them into the note as pictures. */
+    private fun scanIntoNote() {
+        ScanFlow.pick(a) { uris ->
+            a.toast(L("Adding pages…", "Ajout des pages…"))
+            Thread {
+                val sb = StringBuilder()
+                for (u in uris) try { sb.append("<img src=\"").append(imageDataUri(a, u)).append("\" style=\"width:100%;height:auto;border-radius:8px\"/><div><br></div>") } catch (e: Throwable) {}
+                a.post(Runnable { if (sb.isEmpty()) a.toast(L("Could not read the scanned pages.", "Impossible de lire les pages scannées.")) else ins(sb.toString()) })
             }.start()
         }
     }

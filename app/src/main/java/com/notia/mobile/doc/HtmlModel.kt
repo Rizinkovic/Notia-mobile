@@ -17,11 +17,12 @@ data class Fmt(
 sealed class Inline
 class TextRun(val text: String, val fmt: Fmt) : Inline()
 object LineBreak : Inline()
-/** w/h in pixels, 0 when unknown. ext is "png" or "jpeg". */
-class ImageRun(val bytes: ByteArray, val ext: String, val w: Int, val h: Int) : Inline()
+/** w/h in pixels, 0 when unknown. ext is "png" or "jpeg". pct is the width the user chose in the editor (1..100 % of the page width), 0 = automatic. */
+class ImageRun(val bytes: ByteArray, val ext: String, val w: Int, val h: Int, val pct: Int = 0) : Inline()
 
 sealed class Block
-class Para(val runs: List<Inline>, val prefix: String?, val listDepth: Int, val quote: Boolean) : Block()
+/** align: null (left), "center", "right" or "justify". */
+class Para(val runs: List<Inline>, val prefix: String?, val listDepth: Int, val quote: Boolean, val align: String? = null) : Block()
 object Rule : Block()
 class TableBlock(val rows: List<List<List<Block>>>) : Block()
 class ChartBlock(val type: String?, val title: String, val pts: List<Pt>) : Block()
@@ -50,6 +51,34 @@ object HtmlModel {
     private fun styleVal(st: String, p: String): String {
         val m = Regex("(?:^|;)\\s*" + Regex.escape(p) + "\\s*:\\s*([^;]+)", RegexOption.IGNORE_CASE).find(st) ?: return ""
         return m.groupValues[1].trim()
+    }
+
+    /** Normalises a CSS/HTML alignment value to "center", "right", "justify" or null (left). */
+    private fun alignOf(v: String): String? = when (v.trim().lowercase()) {
+        "center", "-webkit-center" -> "center"
+        "right", "end", "-webkit-right" -> "right"
+        "justify", "justify-all" -> "justify"
+        else -> null
+    }
+
+    /** Width the user gave an image, as percent of the page: "width:40%" (the editor writes this), or "width:120px" (assumes a 320px editor). */
+    private fun imgPct(a: String): Int {
+        val st = attr(a, "style")
+        val w = styleVal(st, "width").ifEmpty { attr(a, "width") }.trim().lowercase()
+        if (w.isEmpty()) return 0
+        val num = Regex("^([0-9]+(?:\\.[0-9]+)?)\\s*(%|px)?$").find(w) ?: return 0
+        val v = num.groupValues[1].toDoubleOrNull() ?: return 0
+        val pct = if (num.groupValues[2] == "%") v else v / 320.0 * 100.0
+        return Math.max(5, Math.min(100, Math.round(pct).toInt()))
+    }
+
+    /** Applies [f] to every picture in the model, including pictures inside table cells. */
+    fun mapImages(blocks: List<Block>, f: (ImageRun) -> ImageRun): List<Block> = blocks.map { b ->
+        when (b) {
+            is Para -> if (b.runs.none { it is ImageRun }) b else Para(b.runs.map { r -> if (r is ImageRun) f(r) else r }, b.prefix, b.listDepth, b.quote, b.align)
+            is TableBlock -> TableBlock(b.rows.map { row -> row.map { cell -> mapImages(cell, f) } })
+            else -> b
+        }
     }
 
     /** "#rgb", "#rrggbb" or rgb()/rgba() to RRGGBB, or null */
@@ -109,22 +138,25 @@ object HtmlModel {
         var preDepth = 0
         val fm = ArrayList<Fmt>().apply { add(Fmt()) }
         val open = ArrayList<String>()
+        val al = ArrayList<String?>().apply { add(null) } // text alignment inherited down the open tags (parallel to fm)
+        var runAlign: String? = null
         val lists = ArrayList<IntArray>() // [ordered 0/1, counter]
         var tbl: ArrayList<List<List<Block>>>? = null
         var row = ArrayList<List<Block>>()
         var cell = ArrayList<Block>()
 
         fun flush() {
-            if (runs.isNotEmpty() || pre != null) out.add(Para(runs, pre, preDepth, quote))
+            if (runs.isNotEmpty() || pre != null) out.add(Para(runs, pre, preDepth, quote, runAlign))
             runs = ArrayList(); quote = false; pre = null; preDepth = 0
         }
+        fun put(r: Inline) { if (runs.isEmpty()) runAlign = al.last(); runs.add(r) }
 
         for (m in TOKEN.findAll(html)) {
             if (m.groups[4] != null) {
                 val inPre = open.contains("pre")
                 var t = dec(m.groupValues[4])
                 if (!inPre) { t = RX_WS.replace(t, " "); if (t.isBlank() && runs.isEmpty()) continue }
-                runs.add(TextRun(t, fm.last()))
+                put(TextRun(t, fm.last()))
                 continue
             }
             val closing = m.groupValues[1] == "/"
@@ -135,6 +167,7 @@ object HtmlModel {
                 if (k < 0) continue
                 while (open.size > k) open.removeAt(open.size - 1)
                 while (fm.size > k + 1) fm.removeAt(fm.size - 1)
+                while (al.size > k + 1) al.removeAt(al.size - 1)
                 if (tag in BLOCK || tag == "li") flush()
                 else if (tag == "ul" || tag == "ol") { flush(); if (lists.isNotEmpty()) lists.removeAt(lists.size - 1) }
                 else if (tag == "td" || tag == "th") {
@@ -146,7 +179,7 @@ object HtmlModel {
                 continue
             }
             if (tag in VOID) {
-                if (tag == "br") runs.add(LineBreak)
+                if (tag == "br") put(LineBreak)
                 else if (tag == "hr") { flush(); out.add(Rule) }
                 else if (tag == "img") {
                     val alt = attr(a, "alt"); val src = attr(a, "src")
@@ -172,7 +205,7 @@ object HtmlModel {
                             }
                             if (ext.isNotEmpty() && bytes.isNotEmpty()) {
                                 val sz = imgSize(bytes)
-                                runs.add(ImageRun(bytes, ext, sz?.get(0) ?: 0, sz?.get(1) ?: 0))
+                                put(ImageRun(bytes, ext, sz?.get(0) ?: 0, sz?.get(1) ?: 0, imgPct(a)))
                             }
                         }
                     }
@@ -197,18 +230,21 @@ object HtmlModel {
                 if (styleVal(st, "font-style").contains("italic")) f = f.copy(i = true)
                 if (styleVal(st, "text-decoration").contains("underline")) f = f.copy(u = true)
             }
-            if (tag in BLOCK) { flush(); if (tag == "blockquote") quote = true }
+            var ta = al.last()
+            run { val v = styleVal(st, "text-align").ifEmpty { attr(a, "align") }; if (v.isNotEmpty()) ta = alignOf(v) }
+            if (tag in BLOCK) { flush(); if (tag == "blockquote") quote = true; runAlign = ta }
             else if (tag == "ul" || tag == "ol") { flush(); lists.add(intArrayOf(if (tag == "ol") 1 else 0, 0)) }
             else if (tag == "li") {
                 flush()
                 val l = lists.lastOrNull()
                 pre = if (l != null && l[0] == 1) { l[1]++; "${l[1]}. " } else "• "
                 preDepth = Math.max(1, lists.size)
+                runAlign = ta
             }
             else if (tag == "table") { flush(); tbl = ArrayList() }
             else if (tag == "tr") row = ArrayList()
             else if (tag == "td" || tag == "th") { flush(); cell = ArrayList(); out = cell }
-            open.add(tag); fm.add(f)
+            open.add(tag); fm.add(f); al.add(ta)
         }
         flush()
         tbl?.let { body.add(TableBlock(it)) }

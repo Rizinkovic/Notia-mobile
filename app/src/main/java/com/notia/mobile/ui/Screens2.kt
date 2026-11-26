@@ -20,10 +20,13 @@ import android.widget.TextView
 import android.content.res.ColorStateList
 import com.notia.mobile.MainActivity
 import com.notia.mobile.R
+import com.notia.mobile.core.IncomingNote
+import com.notia.mobile.core.Md
 import com.notia.mobile.core.Store
 import com.notia.mobile.core.Task
 import com.notia.mobile.core.fmtDate
 import com.notia.mobile.core.newId
+import com.notia.mobile.core.sanitize
 import com.notia.mobile.net.Net
 import com.notia.mobile.sys.Qr
 import com.notia.mobile.sys.Reminders
@@ -418,10 +421,7 @@ class TransferScreen(private val a: MainActivity, pre: String? = null) : Screen(
         when (l?.kind) {
             "sync" -> sync(l.url)
             "inbox" -> sendInbox(l.url)
-            "files" -> a.confirm(L("Desktop file share", "Partage de fichier du bureau"),
-                L("This code shares one exported file. Open it in your browser to download it?", "Ce code partage un fichier exporté. L’ouvrir dans votre navigateur pour le télécharger ?"), L("Open", "Ouvrir"), false) {
-                try { a.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(l.url.toString()))) } catch (e: Exception) { a.toast(L("No browser found.", "Aucun navigateur trouvé.")) }
-            }
+            "files" -> importShared(l.url)
             else -> a.info(L("Not a Notia code", "Ce n’est pas un code Notia"), L("This is not a Notia sync code for your local network. Use the code shown by Notia Desktop (same Wi-Fi).", "Ce n’est pas un code de synchronisation Notia de votre réseau local. Utilisez le code affiché par Notia Desktop (même Wi-Fi)."))
         }
     }
@@ -439,9 +439,73 @@ class TransferScreen(private val a: MainActivity, pre: String? = null) : Screen(
                     val n = Store.importNotes(list); Store.changed()
                     a.info(L("Sync complete", "Synchronisation terminée"), if (n == 0) L("Your notes are already up to date.", "Vos notes sont déjà à jour.") else L("$n of ${list.size} note(s) imported or updated.", "$n note(s) sur ${list.size} importée(s) ou mise(s) à jour."))
                 })
+            } catch (e: Net.NotJson) {
+                // the address is Notia Desktop's file share (a page listing an exported note): import that file instead
+                a.post(Runnable { busy = false; importShared(u) })
             } catch (e: Exception) {
-                a.post(Runnable { busy = false; a.info(L("Sync failed", "Échec de la synchronisation"), L("Could not reach the desktop. Same Wi-Fi? Is Notia Desktop still showing the QR code? Allow Notia on private networks if Windows asks.", "Impossible de joindre le bureau. Même Wi-Fi ? Notia Desktop affiche-t-il toujours le QR code ? Autorisez Notia sur les réseaux privés si Windows le demande.")) })
+                a.post(Runnable { busy = false; a.info(L("Sync failed", "Échec de la synchronisation"), Net.explain(e)) })
             }
+        }.start()
+    }
+
+    /**
+     * Notia Desktop "Wi-Fi share": downloads the shared file(s) and imports them. Markdown and text files become notes,
+     * HTML becomes a note, PDF / DOCX / EPUB ... go to the Library.
+     */
+    private fun importShared(u: java.net.URL) {
+        if (busy) return
+        busy = true
+        a.toast(L("Downloading from the desktop…", "Téléchargement depuis le bureau…"))
+        Thread {
+            var notes = 0; var books = 0; var skipped = 0
+            var failure: Throwable? = null
+            try {
+                val files = Net.sharedFiles(a, u)
+                if (files.isEmpty()) throw java.io.IOException(L("the desktop shares no file", "le bureau ne partage aucun fichier"))
+                for (f in files) {
+                    try {
+                        val bytes = Net.download(a, u, f)
+                        val ext = f.name.substringAfterLast('.', "").lowercase()
+                        val stem = f.name.substringBeforeLast('.', f.name).trim().ifEmpty { L("Imported note", "Note importée") }
+                        when (ext) {
+                            "md", "markdown", "txt", "text" -> {
+                                val text = String(bytes, Charsets.UTF_8).removePrefix("\uFEFF")
+                                val html = if (ext == "md" || ext == "markdown") Md.toHtml(text) else text.replace("\r\n", "\n").split('\n').joinToString("") { "<div>" + (if (it.isBlank()) "<br>" else it.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")) + "</div>" }
+                                val title = (if (ext == "md" || ext == "markdown") Md.title(text) else null) ?: stem
+                                val now = System.currentTimeMillis()
+                                a.runOnUiThread { Store.importNotes(listOf(IncomingNote(newId(), title.take(200), html.take(5_000_000), "", now, now))); Store.changed() }
+                                notes++
+                            }
+                            "html", "htm" -> {
+                                val raw = String(bytes, Charsets.UTF_8)
+                                val body = Regex("<body[^>]*>([\\s\\S]*?)</body>", RegexOption.IGNORE_CASE).find(raw)?.groupValues?.get(1) ?: raw
+                                val now = System.currentTimeMillis()
+                                a.runOnUiThread { Store.importNotes(listOf(IncomingNote(newId(), stem.take(200), sanitize(body).take(5_000_000), "", now, now))); Store.changed() }
+                                notes++
+                            }
+                            else -> {
+                                val tmp = java.io.File(a.cacheDir, "dl-" + System.nanoTime() + "." + ext.ifEmpty { "bin" })
+                                try {
+                                    tmp.writeBytes(bytes)
+                                    if (com.notia.mobile.sys.Library.EXT.contains(ext) && Store.books.size < com.notia.mobile.sys.Library.MAX_BOOKS) {
+                                        val b = com.notia.mobile.sys.Library.import(a, android.net.Uri.fromFile(tmp)).also { it.title = stem }
+                                        a.runOnUiThread { Store.books.add(0, b); Store.saveLib() }
+                                        books++
+                                    } else skipped++
+                                } catch (e: Exception) { skipped++ } finally { tmp.delete() }
+                            }
+                        }
+                    } catch (e: Exception) { failure = e; skipped++ }
+                }
+            } catch (e: Exception) { failure = e }
+            a.post(Runnable {
+                busy = false
+                if (notes + books == 0) a.info(L("Import failed", "Échec de l’importation"), failure?.let { Net.explain(it) } ?: L("Nothing could be imported from this code.", "Rien n’a pu être importé depuis ce code."))
+                else a.info(L("Imported from the desktop", "Importé depuis le bureau"),
+                    listOfNotNull(if (notes > 0) L("$notes note(s) added to Notes", "$notes note(s) ajoutée(s) aux Notes") else null,
+                        if (books > 0) L("$books file(s) added to the Library", "$books fichier(s) ajouté(s) à la Bibliothèque") else null,
+                        if (skipped > 0) L("$skipped skipped", "$skipped ignoré(s)") else null).joinToString("\n"))
+            })
         }.start()
     }
 

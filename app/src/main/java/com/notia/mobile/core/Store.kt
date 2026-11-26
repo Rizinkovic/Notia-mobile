@@ -25,6 +25,8 @@ class Book(
     val id: String, var title: String, val kind: String, val file: String,
     var pct: Double = 0.0, var page: Int = 0, var total: Int = 0, var time: Long = 0, var last: Long = 0,
     val bm: MutableList<Mark> = ArrayList(), val hl: MutableList<Mark> = ArrayList(),
+    /** Author from the file's metadata. null = not looked up yet, "" = the file has none. */
+    var author: String? = null,
 )
 
 val CAT_COLORS = listOf("#8B6CF6", "#F2B33D", "#3DA5E0", "#EF6B9A", "#3FBF7F")
@@ -106,7 +108,8 @@ object Store {
     }
 
     private fun bookFrom(o: JSONObject) = Book(o.getString("id"), o.optString("title", "Book"), o.optString("kind", "txt"), o.getString("file"),
-        o.optDouble("pct", 0.0), o.optInt("page"), o.optInt("total"), o.optLong("time"), o.optLong("last"), marks(o.optJSONArray("bm")), marks(o.optJSONArray("hl")))
+        o.optDouble("pct", 0.0), o.optInt("page"), o.optInt("total"), o.optLong("time"), o.optLong("last"), marks(o.optJSONArray("bm")), marks(o.optJSONArray("hl")),
+        if (o.has("author") && !o.isNull("author")) o.optString("author") else null)
 
     // ---- Expo (AsyncStorage) migration: notes, categories, tasks and library carry over ----
     private fun migrate(ctx: Context) {
@@ -173,7 +176,7 @@ object Store {
             k == "tasks" -> jobs.add(File(dir, "tasks.json") to JSONArray().also { a -> tasks.forEach { a.put(JSONObject().put("id", it.id).put("title", it.title).put("due", it.due ?: JSONObject.NULL).put("done", it.done).put("armed", it.armed)) } }.toString())
             k == "lib" -> jobs.add(File(dir, "library.json") to JSONArray().also { a -> books.forEach { b ->
                 a.put(JSONObject().put("id", b.id).put("title", b.title).put("kind", b.kind).put("file", b.file).put("pct", b.pct).put("page", b.page).put("total", b.total)
-                    .put("time", b.time).put("last", b.last).put("bm", marksJson(b.bm)).put("hl", marksJson(b.hl))) } }.toString())
+                    .put("time", b.time).put("last", b.last).put("bm", marksJson(b.bm)).put("hl", marksJson(b.hl)).also { j -> b.author?.let { j.put("author", it) } }) } }.toString())
             k.startsWith("n:") -> notes.firstOrNull { it.id == k.substring(2) }?.let { n ->
                 jobs.add(File(dir, "notes/${n.id}.json") to JSONObject().put("id", n.id).put("title", n.title).put("html", n.html).put("cat", n.cat ?: "").put("created", n.created).put("modified", n.modified).toString())
             }

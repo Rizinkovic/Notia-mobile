@@ -56,6 +56,9 @@ class MainActivity : Activity(), MainActivityLike {
     private var pickCb: ((Uri?) -> Unit)? = null
     private var permCb: ((Boolean) -> Unit)? = null
     private var pendingBook: Uri? = null
+    private var senderCb: ((Int, Intent?) -> Unit)? = null
+    private var imagesCb: ((List<Uri>) -> Unit)? = null
+    private var saveCb: ((Uri?) -> Unit)? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -182,10 +185,43 @@ class MainActivity : Activity(), MainActivityLike {
         try { startActivityForResult(i, 11) } catch (e: Exception) { pickCb = null; cb(null) }
     }
 
+    /** Starts a Google Play services screen (the document scanner) and reports its result code and data. */
+    fun startSender(sender: android.content.IntentSender, cb: (Int, Intent?) -> Unit) {
+        senderCb = cb
+        try { startIntentSenderForResult(sender, 12, null, 0, 0, 0) } catch (e: Exception) { senderCb = null; cb(RESULT_CANCELED, null) }
+    }
+
+    /** Pick one or more pictures from the gallery or a file manager. */
+    fun pickImages(cb: (List<Uri>) -> Unit) {
+        imagesCb = cb
+        val i = Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        try { startActivityForResult(Intent.createChooser(i, null), 13) } catch (e: Exception) { imagesCb = null; cb(emptyList()) }
+    }
+
+    /** "Save as" dialog; the callback gets the chosen document, or null when cancelled. */
+    fun createDocument(name: String, mime: String, cb: (Uri?) -> Unit) {
+        saveCb = cb
+        val i = Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType(mime).putExtra(Intent.EXTRA_TITLE, name)
+        try { startActivityForResult(i, 14) } catch (e: Exception) { saveCb = null; cb(null) }
+    }
+
     @Deprecated("framework callback")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == 11) { val cb = pickCb; pickCb = null; cb?.invoke(if (resultCode == RESULT_OK) data?.data else null) }
+        when (requestCode) {
+            11 -> { val cb = pickCb; pickCb = null; cb?.invoke(if (resultCode == RESULT_OK) data?.data else null) }
+            12 -> { val cb = senderCb; senderCb = null; cb?.invoke(resultCode, data) }
+            13 -> {
+                val cb = imagesCb; imagesCb = null
+                val out = ArrayList<Uri>()
+                if (resultCode == RESULT_OK && data != null) {
+                    val c = data.clipData
+                    if (c != null) for (k in 0 until c.itemCount) c.getItemAt(k).uri?.let { out.add(it) } else data.data?.let { out.add(it) }
+                }
+                cb?.invoke(out)
+            }
+            14 -> { val cb = saveCb; saveCb = null; cb?.invoke(if (resultCode == RESULT_OK) data?.data else null) }
+        }
     }
 
     override fun requestNotifPermission(cb: (Boolean) -> Unit) {

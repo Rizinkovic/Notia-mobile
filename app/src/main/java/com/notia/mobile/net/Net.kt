@@ -25,7 +25,10 @@ import java.net.URL
  * Desktop QR codes (token = 32 lowercase hex characters, one per session):
  *   http://<ip>:<port>/<token>/notes   "Sync notes to phone": the phone GETs it and imports {"v":1,"notes":[...]}
  *   http://<ip>:<port>/<token>/inbox   "Receive notes from phone": the phone POSTs {"v":1,"notes":[...]} to it
- *   http://<ip>:<port>/<hex>/          "Wi-Fi share" of one exported file: meant for a browser
+ *   http://<ip>:<port>/<hex>/          "Wi-Fi share" (the only server in Notia Desktop 1.2.x): GET /<hex>/ is a page listing the exported
+ *                                      file(s), GET /<hex>/<n>/ downloads file n. The phone downloads and imports them (md/txt/html become
+ *                                      notes, pdf/docx/epub/... go to the Library). Tokens there are 1-16 hex digits, not always 32.
+ * A sync address that answers with that page (instead of JSON) is treated as a file share too.
  */
 object Net {
     const val PORT = 8765
@@ -62,15 +65,18 @@ object Net {
     }
 
     fun clean(raw: String): List<IncomingNote> {
-        val o = try { JSONObject(raw) } catch (e: Exception) { return emptyList() }
-        if (o.optInt("v") != 1) return emptyList()
-        val arr = o.optJSONArray("notes") ?: return emptyList()
+        val txt = raw.trim().removePrefix("\uFEFF")
+        // The envelope is {"v":1,"notes":[...]}, but a bare array or "v" missing / sent as text is accepted too.
+        val arr = try {
+            if (txt.startsWith("[")) JSONArray(txt)
+            else JSONObject(txt).let { o -> if (o.optInt("v", 1) > 1) null else (o.optJSONArray("notes") ?: o.optJSONArray("data")) }
+        } catch (e: Exception) { null } ?: return emptyList()
         val now = System.currentTimeMillis()
         val out = ArrayList<IncomingNote>()
         for (i in 0 until Math.min(arr.length(), 200)) {
             val n = arr.optJSONObject(i) ?: continue
-            val id = n.optString("id").replace(Regex("[^\\w\\-]"), "").take(40)
-            if (id.isEmpty()) continue
+            var id = n.optString("id").replace(Regex("[^\\w\\-]"), "").take(40)
+            if (id.isEmpty()) id = "d" + Math.abs((n.optString("title") + n.optLong("created", 0)).hashCode())
             fun ts(k: String): Long { val v = n.optLong(k, 0); return if (v > 0) v else now }
             out.add(IncomingNote(id, n.optString("title").take(200), sanitize(n.optString("html").take(5_000_000)),
                 (if (n.isNull("category")) "" else n.optString("category")).take(30), ts("created"), ts("modified")))
@@ -98,9 +104,10 @@ object Net {
     /** What a scanned QR code is: "sync" (desktop gives notes), "inbox" (desktop takes notes) or "files" (desktop file share). */
     class Link(val kind: String, val url: URL)
 
-    private val RX_SYNC = Regex("^/[a-f0-9]{32}/notes$")
-    private val RX_INBOX = Regex("^/[a-f0-9]{32}/inbox$")
-    private val RX_FILES = Regex("^/[a-f0-9]{1,32}/$")
+    // Tokens are lowercase hex. Notia Desktop's Wi-Fi share makes them from a 64-bit number (1 to 16 digits), the sync codes use 32.
+    private val RX_SYNC = Regex("^/[a-f0-9]{6,64}/(notes|sync)/?$")
+    private val RX_INBOX = Regex("^/[a-f0-9]{6,64}/inbox/?$")
+    private val RX_FILES = Regex("^/[a-f0-9]{1,64}/?$")
 
     /** Classifies a QR value or pasted link. Returns null unless it is a Notia link on a local network. */
     fun parseLink(s: String): Link? = try {
@@ -127,19 +134,79 @@ object Net {
         }
     } catch (e: Exception) { null }
 
-    private fun open(ctx: Context, u: URL): HttpURLConnection = (lan(ctx)?.openConnection(u) ?: u.openConnection()) as HttpURLConnection
+    private fun open(ctx: Context, u: URL, bound: Boolean): HttpURLConnection =
+        ((if (bound) lan(ctx)?.openConnection(u) else null) ?: u.openConnection()) as HttpURLConnection
 
-    /** Downloads the desktop's notes. Throws IOException when the desktop cannot be reached or answers badly. */
-    fun fetchSync(ctx: Context, u: URL): List<IncomingNote> {
-        val c = open(ctx, u)
-        c.connectTimeout = 8000; c.readTimeout = 20000
-        try {
-            if (c.responseCode != 200) throw java.io.IOException("HTTP " + c.responseCode)
-            val bos = ByteArrayOutputStream(); val buf = ByteArray(8192)
-            c.inputStream.use { while (true) { val r = it.read(buf); if (r < 0) break; bos.write(buf, 0, r); if (bos.size() > MAX_BODY) throw java.io.IOException("too large") } }
-            return clean(bos.toString("UTF-8"))
-        } finally { c.disconnect() }
+    private fun open(ctx: Context, u: URL): HttpURLConnection = open(ctx, u, true)
+
+    class HttpError(val code: Int) : java.io.IOException("HTTP $code")
+    /** The address answered with a web page, not notes: that is Notia Desktop's file share, not a notes sync. */
+    class NotJson : java.io.IOException("not json")
+
+    /**
+     * GET with one retry on the other route: first through the Wi-Fi network itself, then through Android's default route
+     * (some phones and VPN setups only work with one of the two). Returns content type and body.
+     */
+    private fun get(ctx: Context, u: URL, limit: Int, readMs: Int = 20000): Pair<String, ByteArray> {
+        var last: Exception? = null
+        val routes = if (lan(ctx) != null) booleanArrayOf(true, false) else booleanArrayOf(false)
+        for (bound in routes) {
+            try {
+                val c = open(ctx, u, bound)
+                c.connectTimeout = 8000; c.readTimeout = readMs; c.instanceFollowRedirects = true
+                c.setRequestProperty("Accept", "application/json, */*"); c.setRequestProperty("User-Agent", "NotiaMobile/1.1.2")
+                try {
+                    val code = c.responseCode
+                    if (code != 200) throw HttpError(code)
+                    val bos = ByteArrayOutputStream(); val buf = ByteArray(16384)
+                    c.inputStream.use { while (true) { val r = it.read(buf); if (r < 0) break; bos.write(buf, 0, r); if (bos.size() > limit) throw java.io.IOException("too large") } }
+                    return (c.contentType ?: "") to bos.toByteArray()
+                } finally { c.disconnect() }
+            } catch (e: HttpError) { throw e } catch (e: Exception) { last = e }
+        }
+        throw last ?: java.io.IOException("failed")
     }
+
+    /** Downloads the desktop's notes. Throws NotJson for a file-share page, HttpError for a bad status, IOException when unreachable. */
+    fun fetchSync(ctx: Context, u: URL): List<IncomingNote> {
+        val (ct, body) = get(ctx, u, MAX_BODY)
+        val text = String(body, Charsets.UTF_8)
+        if (ct.contains("html", true) || text.trimStart().startsWith("<")) throw NotJson()
+        return clean(text)
+    }
+
+    /** Notia Desktop "Wi-Fi share": http://ip:port/<token>/ lists the exported file(s); /<token>/<n>/ downloads file n. */
+    class SharedFile(val index: Int, val name: String)
+
+    fun base(u: URL): URL = URL(u.protocol, u.host, u.port, u.path.substringBeforeLast('/').let { p -> val parts = p.split('/').filter { it.isNotEmpty() }; "/" + (parts.firstOrNull() ?: "") + "/" })
+
+    fun sharedFiles(ctx: Context, u: URL): List<SharedFile> {
+        val html = String(get(ctx, base(u), 1_000_000).second, Charsets.UTF_8)
+        val out = ArrayList<SharedFile>()
+        for (m in Regex("<a\\s+href=\"(\\d+)/[^\"]*\"[^>]*>([\\s\\S]*?)</a>", RegexOption.IGNORE_CASE).findAll(html)) {
+            val name = com.notia.mobile.doc.HtmlModel.dec(m.groupValues[2].replace(Regex("<[^>]*>"), "")).trim()
+            out.add(SharedFile(m.groupValues[1].toInt(), name.ifEmpty { "file" + m.groupValues[1] }))
+        }
+        return out.distinctBy { it.index }.take(10)
+    }
+
+    fun download(ctx: Context, u: URL, f: SharedFile, limit: Int = 40_000_000): ByteArray =
+        get(ctx, URL(base(u), "${f.index}/"), limit, 60000).second
+
+    /** A short, human reason for a failed request, so "sync failed" says why. */
+    fun explain(e: Throwable): String = when (e) {
+        is HttpError -> when (e.code) {
+            404 -> L2("The desktop does not offer notes at this address (HTTP 404). Make sure the code on the desktop is still showing, or use Notia Desktop's “Wi-Fi share” and scan that code.",
+                "Le bureau ne propose pas de notes à cette adresse (HTTP 404). Vérifiez que le code est toujours affiché sur le bureau, ou utilisez « Partage Wi-Fi » de Notia Desktop et scannez ce code.")
+            else -> L2("The desktop answered with an error (HTTP ${e.code}).", "Le bureau a répondu par une erreur (HTTP ${e.code}).")
+        }
+        is java.net.SocketTimeoutException -> L2("The desktop did not answer in time. A firewall may be blocking it: allow Notia on private networks.", "Le bureau n’a pas répondu à temps. Un pare-feu le bloque peut-être : autorisez Notia sur les réseaux privés.")
+        is java.net.ConnectException -> L2("Connection refused. Is the code still showing on the desktop, and are both devices on the same Wi-Fi?", "Connexion refusée. Le code est-il toujours affiché sur le bureau, et les deux appareils sont-ils sur le même Wi-Fi ?")
+        is java.net.UnknownHostException, is java.net.NoRouteToHostException -> L2("The desktop's address cannot be found. Check that both devices are on the same Wi-Fi.", "L’adresse du bureau est introuvable. Vérifiez que les deux appareils sont sur le même Wi-Fi.")
+        else -> L2("Could not reach the desktop (${e.message ?: e.javaClass.simpleName}).", "Impossible de joindre le bureau (${e.message ?: e.javaClass.simpleName}).")
+    }
+
+    private fun L2(en: String, fr: String) = if (Store.lang == "fr") fr else en
 
     /** Sends notes to the desktop's "Receive from phone" address. HTTP status, or 0 when unreachable. Blocking. */
     fun postInbox(ctx: Context, u: URL, body: String): Int = try {

@@ -47,7 +47,8 @@ object DocxWriter {
             val name = "img$n.${im.ext}"
             media["word/media/$name"] = im.bytes
             val id = addRel("image", "media/$name")
-            val cx = if (im.w > 0) Math.min(im.w.toLong() * 9525L, 5400000L) else 4000000L
+            // page content is 9638 twips = 6,120,130 EMU wide; a width the user chose in the editor is a share of it
+            val cx = if (im.pct > 0) 6120130L * im.pct / 100L else if (im.w > 0) Math.min(im.w.toLong() * 9525L, 5400000L) else 4000000L
             val cy = if (im.w > 0) Math.round(cx.toDouble() * im.h / im.w) else 3000000L
             return "<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\"><wp:extent cx=\"$cx\" cy=\"$cy\"/><wp:docPr id=\"$n\" name=\"Image $n\"/>" +
                 "<a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">" +
@@ -71,7 +72,8 @@ object DocxWriter {
         lateinit var blockXml: (Block) -> String
 
         fun paraXml(p: Para): String {
-            val ppr = if (p.prefix != null) "<w:ind w:left=\"${360 * Math.max(1, p.listDepth)}\" w:hanging=\"260\"/>" else if (p.quote) "<w:ind w:left=\"720\"/>" else ""
+            val jc = when (p.align) { "center" -> "<w:jc w:val=\"center\"/>"; "right" -> "<w:jc w:val=\"right\"/>"; "justify" -> "<w:jc w:val=\"both\"/>"; else -> "" }
+            val ppr = (if (p.prefix != null) "<w:ind w:left=\"${360 * Math.max(1, p.listDepth)}\" w:hanging=\"260\"/>" else if (p.quote) "<w:ind w:left=\"720\"/>" else "") + jc
             val sb = StringBuilder()
             if (p.prefix != null) sb.append(runXml(p.prefix, Fmt(), null))
             for (r in p.runs) when (r) {

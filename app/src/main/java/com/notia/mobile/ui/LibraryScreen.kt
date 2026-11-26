@@ -15,6 +15,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ScrollView
+import android.widget.TextView
 import com.notia.mobile.MainActivity
 import com.notia.mobile.R
 import com.notia.mobile.core.Book
@@ -24,6 +25,9 @@ import com.notia.mobile.sys.Library
 import com.notia.mobile.sys.Reminders
 import java.io.File
 import java.util.concurrent.Executors
+
+/** "312 KB" / "4.2 MB" */
+fun fmtSize(n: Long): String = if (n >= 1024 * 1024) String.format(java.util.Locale.US, "%.1f MB", n / 1048576.0) else Math.max(1L, n / 1024).toString() + " KB"
 
 fun importError(code: String) = when (code) {
     "unsupported" -> L("Unsupported file. Use PDF, EPUB, MOBI, CBZ, DOCX, TXT or HTML.", "Fichier non pris en charge. Utilisez PDF, EPUB, MOBI, CBZ, DOCX, TXT ou HTML.")
@@ -53,7 +57,11 @@ class LibraryScreen(private val a: MainActivity) : Screen() {
                 background = a.pressable(Th.card, 20f, Th.line); setPadding(a.dp(12), a.dp(12), a.dp(14), a.dp(12))
                 put(cover(b), a.dp(58), a.dp(82), 0f, 0, 0, 14, 0)
                 put(a.vbox {
-                    put(a.text(b.title, 16f, Th.ink, true).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END })
+                    put(a.hbox {
+                        put(a.text(b.title, 16f, Th.ink, true).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END }, 0, WRAP, 1f)
+                        // three dots: name, type, author and size of this file
+                        put(a.iconBtn(R.drawable.ic_more, L("Details", "Détails"), Th.sub, 20) { details(b) }.also { it.layoutParams = LinearLayout.LayoutParams(a.dp(36), a.dp(36)) }, AUTO, AUTO, 0f, 4, -6, -8, -6)
+                    }, MATCH, WRAP)
                     put(progressBar(b.pct), MATCH, a.dp(5), 0f, 0, 10, 0, 6)
                     val page = if (b.total > 0) "  •  p. ${Math.max(1, Math.round(b.pct * (b.total - 1)).toInt() + 1)}/${b.total}" else ""
                     put(a.text("${Math.round(b.pct * 100)}%  •  ${fmtTime(b.time)}$page", 12f, Th.sub))
@@ -107,6 +115,42 @@ class LibraryScreen(private val a: MainActivity) : Screen() {
             put(a.vbox { put(a.text(L("Books", "Livres"), 12f, Th.sub)); put(a.text("${Store.books.size}/${Library.MAX_BOOKS}", 22f, Th.ink, true), MATCH, WRAP, 0f, 0, 4, 0, 0) }, 0, WRAP, 1f)
         })
         empty.text = if (Store.books.isEmpty()) L("Your library is empty.\nTap + to add a PDF, EPUB, MOBI, CBZ comic, DOCX or text file.", "Votre bibliothèque est vide.\nAppuyez sur + pour ajouter un PDF, EPUB, MOBI, DOCX ou fichier texte.") else ""
+    }
+
+    private fun typeName(b: Book): String = when (b.kind) {
+        "pdf" -> L("PDF document", "Document PDF")
+        "epub" -> L("EPUB book", "Livre EPUB")
+        "mobi" -> L("MOBI / AZW book", "Livre MOBI / AZW")
+        "cbz" -> L("CBZ comic", "Bande dessinée CBZ")
+        "docx" -> L("Word document", "Document Word")
+        "txt" -> L("Text file", "Fichier texte")
+        "html" -> L("HTML page", "Page HTML")
+        else -> b.kind.uppercase()
+    }
+
+    /** Name, file type, author and size of a library file. The author is read from the file's metadata the first time. */
+    private fun details(b: Book) {
+        val s = Sheet(a, L("Details", "Détails"))
+        fun line(label: String, value: String): TextView {
+            val v = a.text(value, 16f, Th.ink, true).apply { setLineSpacing(0f, 1.1f); setTextIsSelectable(true) }
+            s.body.put(a.vbox {
+                put(a.text(label.uppercase(), 11f, Th.sub, true).apply { letterSpacing = 0.08f }, MATCH, WRAP, 0f, 0, 0, 0, 4)
+                put(v, MATCH, WRAP)
+            }, MATCH, WRAP, 0f, 0, 0, 0, 14)
+            return v
+        }
+        line(L("Name", "Nom"), b.title)
+        line(L("File type", "Type de fichier"), typeName(b) + "  (." + b.kind + ")")
+        val unknown = L("Unknown", "Inconnu")
+        val authorView = line(L("Author", "Auteur"), b.author?.ifEmpty { null } ?: if (b.author == null) "…" else unknown)
+        line(L("Size", "Taille"), fmtSize(Store.bookFile(b).length()))
+        if (b.author == null) Thread {
+            val au = Library.author(a, b)
+            a.post(Runnable { authorView.text = au.ifEmpty { unknown }; Store.saveLib() })
+        }.start()
+        s.body.put(a.pill(L("Close", "Fermer"), false) { s.dismiss() }, MATCH, WRAP, 0f, 0, 4, 0, 8)
+        s.body.put(a.pill(L("Remove from library", "Retirer de la bibliothèque"), false, true) { s.dismiss(); remove(b) })
+        s.show()
     }
 
     private fun remove(b: Book) {
